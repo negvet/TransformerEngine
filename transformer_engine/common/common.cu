@@ -135,3 +135,14 @@ bool is_supported_by_CC_100() {
 }
 
 }  // namespace transformer_engine
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool nvte_is_supported_nontn_fp8_gemm() {
+  // Always return false
+  return false;
+}
+#ifdef __cplusplus
+}  // extern "C"
+#endif
