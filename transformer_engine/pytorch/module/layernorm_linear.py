@@ -68,6 +68,19 @@ from ..cpp_extensions import (
 
 __all__ = ["LayerNormLinear"]
 
+LOG_OPS = 0
+DUMP_TENSORS = 0
+
+VERSION = "te2"
+_layer_counter = 0
+
+DEBUG_DIR = "/home/scratch.etsykunov_ent/scripts/compare_te1_te2_fp8/tensors_lnl_" + VERSION
+if DUMP_TENSORS:
+    os.makedirs(DEBUG_DIR, exist_ok=True)
+
+STEPS_TO_DUMP = 5
+LAYER_TO_DUMP = 1  # 1-indexed
+
 
 class _LayerNormLinear(torch.autograd.Function):
     """LayerNormLinear semi-top level module
@@ -303,6 +316,18 @@ class _LayerNormLinear(torch.autograd.Function):
             if hasattr(recipe, "fp8_gemm_fprop"):
                 fprop_gemm_use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
 
+        # Log
+        if DUMP_TENSORS and module.step_num <= STEPS_TO_DUMP and module.layer_num == LAYER_TO_DUMP:
+            filename = f'{DEBUG_DIR}/gemm_input_weight_layer_{module.layer_num}_step_{module.step_num}.pt'
+            torch.save(weightmat._data.detach().clone(), filename)
+            filename = f'{DEBUG_DIR}/gemm_input_weight_scale_inv_layer_{module.layer_num}_step_{module.step_num}.pt'
+            torch.save(weightmat._scale_inv.detach().clone(), filename)
+
+            filename = f'{DEBUG_DIR}/gemm_input_activation_layer_{module.layer_num}_step_{module.step_num}.pt'
+            torch.save(ln_out_total._data.detach().clone(), filename)
+            filename = f'{DEBUG_DIR}/gemm_input_activation_scale_inv_layer_{module.layer_num}_step_{module.step_num}.pt'
+            torch.save(ln_out_total._scale_inv.detach().clone(), filename)
+
         out, *_, rs_out = general_gemm(
             weightmat,
             ln_out_total,
@@ -315,6 +340,12 @@ class _LayerNormLinear(torch.autograd.Function):
             ub_type=ub_type,
             extra_output=rs_out,
         )
+
+        # Log
+        if DUMP_TENSORS and module.step_num <= STEPS_TO_DUMP and module.layer_num == LAYER_TO_DUMP:
+            filename = f'{DEBUG_DIR}/gemm_output_layer_{module.layer_num}_step_{module.step_num}.pt'
+            torch.save(out.detach().clone(), filename)
+
         nvtx_range_pop(f"{nvtx_label}.gemm")
 
         if not weight.requires_grad:
@@ -1004,6 +1035,12 @@ class LayerNormLinear(TransformerEngineBaseModule):
     ) -> None:
         super().__init__()
 
+        self.step_num = 0
+
+        global _layer_counter
+        _layer_counter += 1
+        self.layer_num = _layer_counter
+
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.in_features = in_features
         self.out_features = out_features
@@ -1307,6 +1344,16 @@ class LayerNormLinear(TransformerEngineBaseModule):
                                produced)
         """
 
+        if LOG_OPS:
+            print(f"TELayerNormLinear layer id: {self.layer_num}, input tensor shape: {inp.shape}")
+        self.step_num += 1
+
+        # Log
+        if DUMP_TENSORS and self.step_num <= STEPS_TO_DUMP and self.layer_num == LAYER_TO_DUMP:
+            print(f"Dumping step: {self.step_num}, layer id: {self.layer_num}")
+            filename = f'{DEBUG_DIR}/input_layer_{self.layer_num}_step_{self.step_num}.pt'
+            torch.save(inp.detach().clone(), filename)
+
         if FP8GlobalStateManager.fp8_graph_capturing():
             skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
         else:
@@ -1404,6 +1451,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         if self.gemm_bias_unfused_add:
             out = out + cast_if_needed(bias_tensor, self.activation_dtype)
+
+        # Log
+        if DUMP_TENSORS and self.step_num <=5 and self.layer_num == LAYER_TO_DUMP:
+            filename = f'{DEBUG_DIR}/output_layer_{self.layer_num}_step_{self.step_num}.pt'
+            torch.save(out.detach().clone(), filename)
 
         if self.return_bias:
             if self.return_layernorm_output:
