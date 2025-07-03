@@ -59,3 +59,15 @@ try:
     torch._dynamo.config.error_on_nested_jit_trace = False
 except AttributeError:
     pass  # error_on_nested_jit_trace was added in PyTorch 2.2.0
+
+
+import os
+
+if int(os.getenv("TE_EXP", "0")) > 0:
+    from transformer_engine.pytorch.experimental import Linear as ExperimentalLinear
+    # from transformer_engine.pytorch.experimental import LayerNormLinear as ExperimentalLayerNormLinear
+    Linear = ExperimentalLinear
+    # LayerNormLinear = ExperimentalLayerNormLinear
+    print("Using Experimental Linear")
+else:
+    print("Using TE Linear")
