@@ -14,11 +14,142 @@ from ..utils import get_sm_count, _empty_tensor
 from ..tensor.quantized_tensor import Quantizer
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ...debug.pytorch.debug_quantization import DebugQuantizer
+from ..experimental.quantization import ExperimentalQuantizedTensorBase, GEMMType, MMParams
+
 
 __all__ = [
     "general_gemm",
     "general_grouped_gemm",
 ]
+
+
+def _experimental_qgemm(
+    A: ExperimentalQuantizedTensorBase,
+    B: ExperimentalQuantizedTensorBase,
+    workspace: torch.Tensor,
+    out_dtype: Optional[torch.dtype] = None,
+    quantization_params: Optional[Quantizer] = None,
+    gelu: bool = False,
+    gelu_in: torch.Tensor = None,
+    accumulate: bool = False,
+    layout: str = "TN",
+    out: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+    use_split_accumulator: bool = False,
+    grad: bool = False,
+    ub: Union[tex.CommOverlap, tex.CommOverlapP2P] = None,
+    ub_type: tex.CommOverlapType = None,
+    extra_output: Optional[torch.Tensor] = None,
+    bulk_overlap: bool = False,
+) -> Iterable[Optional[torch.Tensor]]:
+    """Dispatch GEMM to quantizer's qgemm method when A or B are QuantizeResult instances."""
+    # TODO: refactor this: extract data extraction logic, qgemm logic, etc. into separate functions
+    assert isinstance(A, ExperimentalQuantizedTensorBase) and isinstance(B, ExperimentalQuantizedTensorBase), "A and B must be QuantizedExperimentalTensorBase instances"
+
+    A, B = B, A
+
+    # Determine GEMM type based on grad flag and layout
+    if not grad:
+        gemm_type = GEMMType.FPROP
+    else:
+        if layout == "NN":
+            gemm_type = GEMMType.DGRAD
+        elif layout == "NT":
+            gemm_type = GEMMType.WGRAD
+        else:
+            # Default to FPROP for other layouts
+            gemm_type = GEMMType.FPROP
+    
+    # Extract quantizer from QuantizeResult
+    quantizer = None
+    if hasattr(A, 'quantizer') and A.quantizer is not None:
+        quantizer = A.quantizer
+    elif hasattr(B, 'quantizer') and B.quantizer is not None:
+        quantizer = B.quantizer
+    else:
+        raise ValueError("No quantizer found in QuantizedExperimentalTensorBase objects")
+    
+    # Create MMParams
+    m_params = MMParams(
+        out_dtype=out_dtype,
+        use_split_accumulator=use_split_accumulator,
+    )
+    out_dtype = (
+        A.dtype
+        if m_params.out_dtype is None
+        else m_params.out_dtype
+    )
+
+    if gemm_type == GEMMType.FPROP:
+        qx, sx = A.data, A.scale
+        qw, sw = B.data, B.scale
+        assert qx is not None
+        assert sx is not None
+        assert qw is not None
+        assert sw is not None
+        assert A.original_shape is not None
+
+        # Call quantizer's qgemm method
+        result = quantizer.qgemm(
+            qx,
+            qw,
+            m_params,
+            out_dtype,
+            sx,
+            sw,
+            bias,
+            gemm_type=GEMMType.FPROP,
+            qresult_x=A,
+            qresult_w=B,
+        )
+        if len(A.original_shape) > 2:
+            # Original input was 3D, so we need to reshape result back to 3D
+            batch_size = A.original_shape[0]
+            seq_len = A.original_shape[1]
+            result = result.view(batch_size, seq_len, result.shape[-1])
+    elif gemm_type == GEMMType.DGRAD:
+        qdy, sdy = A.data, A.scale
+        qw_t, sw_t = B.data_t, B.scale_t
+        assert qdy is not None
+        assert sdy is not None
+        assert qw_t is not None
+        assert sw_t is not None
+
+        result = quantizer.qgemm(
+            qdy,
+            qw_t,
+            m_params,
+            out_dtype,
+            sdy,
+            sw_t,
+            None,
+            gemm_type=GEMMType.DGRAD,
+            qresult_x=A,
+            qresult_w=B,
+        )
+    elif gemm_type == GEMMType.WGRAD:
+        qdy_t, sdy_t = A.data_t, A.scale_t
+        qx_t, sx_t = B.data_t, B.scale_t
+        assert qdy_t is not None
+        assert sdy_t is not None
+        assert qx_t is not None
+        assert sx_t is not None
+
+        result = quantizer.qgemm(
+            qdy_t,
+            qx_t,
+            m_params,
+            out_dtype,
+            sdy_t,
+            sx_t,
+            None,
+            gemm_type=GEMMType.WGRAD,
+            qresult_x=A,
+            qresult_w=B,
+        )
+
+    # Return in the same format as general_gemm
+    return result, None, None, None
 
 
 def general_gemm(
@@ -62,6 +193,14 @@ def general_gemm(
     if out is not None:
         if not out.is_contiguous():
             raise ValueError("Output tensor is not contiguous.")
+
+    # If A or B are QuantizedExperimentalTensorBase instances -> dispatch to experimental qgemm
+    if (isinstance(A, ExperimentalQuantizedTensorBase) or isinstance(B, ExperimentalQuantizedTensorBase)):
+        return _experimental_qgemm(
+            A, B, workspace, out_dtype, quantization_params, gelu, gelu_in, 
+            accumulate, layout, out, bias, use_split_accumulator, grad, 
+            ub, ub_type, extra_output, bulk_overlap
+        )
 
     debug_quantizer = None
     if isinstance(quantization_params, DebugQuantizer):

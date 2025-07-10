@@ -14,6 +14,7 @@ import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch import torch_version
+from transformer_engine.pytorch import experimental
 
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
@@ -1000,6 +1001,7 @@ class Linear(TransformerEngineBaseModule):
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
         name: Optional[str] = None,
+        experimental_qlinear_params: Optional[experimental.config.QLinearParams] = None,
     ) -> None:
         super().__init__()
 
@@ -1014,6 +1016,8 @@ class Linear(TransformerEngineBaseModule):
         self.rng_tracker_name = rng_tracker_name
         self.symmetric_ar_type = symmetric_ar_type
         self.name = name
+
+        self.experimental_qlinear_params = experimental.config.set_qlinear_params(experimental_qlinear_params)
 
         if TEDebugState.debug_enabled:
             self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
@@ -1302,11 +1306,15 @@ class Linear(TransformerEngineBaseModule):
             else:
                 bias_tensor = None
 
-            quantizers = (
-                self._get_quantizers(fp8_output, fp8_grad)
-                if not debug
-                else self._get_debug_quantizers(fp8_output, fp8_grad)
-            )
+            if self.experimental_qlinear_params is not None:
+                quantizers = experimental.config.get_experimental_quantizers(self.fp8, self.experimental_qlinear_params)
+            else:
+                quantizers = (
+                    self._get_quantizers(fp8_output, fp8_grad)
+                    if not debug
+                    else self._get_debug_quantizers(fp8_output, fp8_grad)
+                )
+
             if debug:
                 if not any_feature_enabled(quantizers):
                     # If no feature is used, then run faster implementation with debug = False.
