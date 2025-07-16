@@ -49,6 +49,8 @@ class ExperimentalQuantizedTensorBase(QuantizedTensorBase):
         the decoding scale for the transposed quantized tensor.
     dtype: torch.dtype
         nominal tensor datatype.
+    device: torch.device
+        device of the tensor.
     low_precision_dtype: Union[utils.Fp4Formats, torch.dtype]
         low precision tensor datatype.
     original_shape: Tuple[int, ...]
@@ -63,9 +65,27 @@ class ExperimentalQuantizedTensorBase(QuantizedTensorBase):
     scale_t: Optional[torch.Tensor] = None
 
     dtype: Optional[torch.dtype] = None
+    device: Optional[torch.device] = None
     low_precision_dtype: Optional[Union[utils.Fp4Formats, torch.dtype]] = None
     original_shape: Optional[Tuple[int, ...]] = None
     quantizer: Optional[ExperimentalQuantizerBase] = None
+
+    # Compatibility
+    @property
+    def _data(self):
+        return self.data
+
+    @_data.setter
+    def _data(self, value):
+        self.data = value
+
+    @property
+    def _scale_inv(self):
+        return self.scale
+
+    @_scale_inv.setter
+    def _scale_inv(self, value):
+        self.scale = value
 
 
 class ExperimentalQuantizerBase(abc.ABC):

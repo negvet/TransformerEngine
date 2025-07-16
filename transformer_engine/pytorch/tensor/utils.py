@@ -13,6 +13,14 @@ from .float8_tensor import Float8Tensor, Float8Quantizer, Float8CurrentScalingQu
 from .mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from .float8_blockwise_tensor import Float8BlockwiseQTensor, Float8BlockQuantizer
 from ..optimizers.multi_tensor_apply import multi_tensor_applier
+from .. import experimental
+
+
+_PER_TENSOR_QUANTIZERS = (
+    Float8Quantizer,
+    Float8CurrentScalingQuantizer,
+    experimental.quantization_per_tensor_ref.PerTensorExperimentalQuantizer,
+)
 
 
 def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):

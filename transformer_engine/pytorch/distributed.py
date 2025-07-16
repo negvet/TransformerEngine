@@ -44,7 +44,9 @@ from .tensor.quantized_tensor import QuantizedTensor, Quantizer
 from .tensor._internal.float8_tensor_base import Float8TensorBase
 from .tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from .tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
+from .tensor.utils import _PER_TENSOR_QUANTIZERS
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor, DebugQuantizer
+from transformer_engine.pytorch import experimental
 
 
 __all__ = ["checkpoint", "CudaRNGStatesTracker"]
@@ -63,6 +65,12 @@ _FP8_ACTIVATION_RECOMPUTE_PHASE = False
 
 
 _ALL_ACTIVE_RNG_STATES = {}
+
+
+_PER_TENSOR_QUANTIZED_TENSORS = (
+    Float8Tensor,
+    experimental.quantization_per_tensor_ref.PerTensorExperimentalQuantizedTensor,
+)
 
 
 def get_all_rng_states() -> bool:
@@ -904,13 +912,13 @@ def _all_gather_fp8(
     async_op: bool = False,
     quantizer: Optional[Quantizer] = None,
     out_shape: Optional[list[int]] = None,
-) -> tuple[Float8TensorBase, Optional[torch.distributed.Work]]:
+) -> tuple[Union[Float8TensorBase, experimental.quantization_per_tensor_ref.PerTensorExperimentalQuantizedTensor], Optional[torch.distributed.Work]]:
     """All-gather FP8 tensor along first dimension."""
     world_size = get_distributed_world_size(process_group)
 
     # Check that quantizer is valid
     if quantizer is not None and not isinstance(
-        quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
+        quantizer, _PER_TENSOR_QUANTIZERS
     ):
         raise ValueError(f"Got non-FP8 quantizer ({quantizer.__class__.__name__})")
 
@@ -922,8 +930,14 @@ def _all_gather_fp8(
     # Cast input tensor to FP8 if needed
     # Note: We cannot directly all-gather the transposed FP8 tensor,
     # so temporarily modify quantizer to avoid creating FP8 transpose.
-    if not isinstance(inp, Float8TensorBase):
-        assert isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer))
+    if not isinstance(
+        inp,
+        (
+            Float8TensorBase,
+            experimental.quantization_per_tensor_ref.PerTensorExperimentalQuantizedTensor,
+        ),
+    ):
+        assert isinstance(quantizer, _PER_TENSOR_QUANTIZERS)
         # we cannot directly gather the transposed fp8 tensor
         # so we need to disable columnwise usage for the quantizer
         # and then set it back to the original value after quantizing
@@ -937,11 +951,11 @@ def _all_gather_fp8(
         )
 
     # Construct output tensor
-    out: Float8TensorBase
+    out: Union[Float8TensorBase, experimental.quantization_per_tensor_ref.PerTensorExperimentalQuantizedTensor]
     if quantizer is not None:
         dtype = torch.float32
         device = "cuda"
-        if isinstance(inp, Float8Tensor):
+        if isinstance(inp, _PER_TENSOR_QUANTIZED_TENSORS):
             dtype = inp.dtype
             device = inp.device
         out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
@@ -954,6 +968,9 @@ def _all_gather_fp8(
         )
         out._transpose = None
         out._transpose_invalid = True
+    elif isinstance(inp, experimental.quantization_per_tensor_ref.PerTensorExperimentalQuantizedTensor):
+        # TODO(negvet): support
+        raise RuntimeError("PerTensorExperimentalQuantizedTensor is not supported yet without Quantizer")
     else:
         raise RuntimeError("FP8TensorBase is not supported yet without Quantizer")
 
@@ -972,6 +989,12 @@ def _all_gather_fp8(
     needs_transpose = (
         quantizer is not None and quantizer.columnwise_usage and not is_non_tn_fp8_gemm_supported()
     )
+    needs_transpose_experimental = (
+        quantizer is not None
+        and quantizer.columnwise_usage
+        and isinstance(quantizer, experimental.quantization_per_tensor_ref.PerTensorExperimentalQuantizer)
+    )
+    needs_transpose = needs_transpose or needs_transpose_experimental
     if needs_transpose:
         if handle is not None:
             handle.wait()
@@ -1348,9 +1371,7 @@ def gather_along_first_dim(
     out_shape[0] *= world_size
 
     # FP8 case: delayed scaling or current scaling
-    if isinstance(inp, Float8TensorBase) or isinstance(
-        quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
-    ):
+    if isinstance(inp, _PER_TENSOR_QUANTIZED_TENSORS) or isinstance(quantizer, _PER_TENSOR_QUANTIZERS):
         return _all_gather_fp8(
             inp,
             process_group,

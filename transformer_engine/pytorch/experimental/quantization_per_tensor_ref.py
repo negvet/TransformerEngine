@@ -2,8 +2,9 @@
 #
 # See LICENSE for license information.
 
+import math
 import torch
-from typing import Tuple, Optional, Union
+from typing import Iterable, Tuple, Optional, Union
 
 from transformer_engine.pytorch.experimental.quantization import ExperimentalQuantizerBase, MMParams, GEMMType, ExperimentalQuantizedTensorBase
 from transformer_engine.pytorch.experimental import utils
@@ -16,6 +17,7 @@ class PerTensorExperimentalQuantizedTensor(ExperimentalQuantizedTensorBase):
         return (
             f"{self.__class__.__name__}("
             f"dtype={self.dtype}, "
+            f"device={self.device}, "
             f"low_precision_dtype={self.low_precision_dtype}, "
             f"data={self.dequantize(dtype=self.dtype)}, "
             f"original_shape={self.original_shape}"
@@ -119,6 +121,13 @@ class PerTensorExperimentalQuantizedTensor(ExperimentalQuantizedTensorBase):
         if not self.data.is_contiguous():
             self.data = self.data.contiguous()
         self.data_t = self.data.t().contiguous()
+        self.scale_t = self.scale
+
+    def size(self, *args, **kwargs):
+        if self.data is not None:
+            return self.data.size(*args, **kwargs)
+        size = self.data_t.size(*args, **kwargs)
+        return torch.Size([size[-1], math.prod(size[:-1])])
 
 
 def _scale_from_amax_tensor(
@@ -179,7 +188,11 @@ def _scale_from_amax_tensor(
     return scale, scale_inv, amax
 
 
-class Float8CurrentScalingRefQuantizer(ExperimentalQuantizerBase):
+class PerTensorExperimentalQuantizer(ExperimentalQuantizerBase):
+    """Per-tensor experimental quantizer"""
+
+
+class Float8CurrentScalingRefQuantizer(PerTensorExperimentalQuantizer):
     """FP8 quantizer with current scaling"""
 
     """FP8 datatype"""
@@ -288,6 +301,7 @@ class Float8CurrentScalingRefQuantizer(ExperimentalQuantizerBase):
             data_t=qx_t,
             scale_t=sx_t,
             dtype=tensor.dtype,
+            device=tensor.device,
             low_precision_dtype=self.dtype,
             quantizer=self,
             original_shape=original_shape,
@@ -403,6 +417,53 @@ class Float8CurrentScalingRefQuantizer(ExperimentalQuantizerBase):
 
         return dst
 
+    def make_empty(
+            self,
+            shape: Iterable[int],
+            *,
+            dtype: torch.dtype = torch.float32,
+            device: Optional[torch.device] = None,
+            requires_grad: bool = False,
+    ) -> PerTensorExperimentalQuantizedTensor:
+        assert len(shape) == 2, "shape is not 2d"
+
+        # Canonicalize tensor attributes
+        if device is None:
+            device = torch.device("cuda")
+
+        # Empty scale tensor for fake quantization (data is already dequantized)
+        empty_scale = torch.empty(0)
+
+        # Allocate quantized data
+        qx = torch.empty(shape, dtype=self.dtype, device=device)
+        sx = torch.empty(1, dtype=torch.float32, device=device)
+
+        # Allocate quantized data transpose if needed
+        qx_t = None
+        sx_t = None
+        if self.columnwise_usage:
+            inner_dim = qx.size(-1)
+            qx_t = torch.empty(
+                inner_dim,
+                qx.numel() // inner_dim,
+                dtype=torch.uint8,
+                device=device,
+            )
+            sx_t = torch.empty(1, dtype=torch.float32, device=device)
+
+        # Construct quantized tensor
+        return PerTensorExperimentalQuantizedTensor(
+            data=qx,
+            scale=sx,
+            data_t=qx_t,
+            scale_t=sx_t,
+            dtype=dtype,
+            device=device,
+            low_precision_dtype=self.dtype,
+            quantizer=self,
+            original_shape=shape,
+        )
+
 
 def _compute_scale_fp4fp8(
     x_dtype: torch.dtype,
@@ -481,7 +542,7 @@ def _compute_scale_fp4fp8(
     return scale, scale_inv, amax
 
 
-class Float4Float8CurrentScalingEmulationRefQuantizer(ExperimentalQuantizerBase):
+class Float4Float8CurrentScalingEmulationRefQuantizer(PerTensorExperimentalQuantizer):
     """FP4/FP8 quantizer with current scaling and fake quantization"""
 
     """FP4/FP8 datatype"""
@@ -608,6 +669,7 @@ class Float4Float8CurrentScalingEmulationRefQuantizer(ExperimentalQuantizerBase)
             data_t=qx_t,
             scale_t=sx_t,
             dtype=tensor.dtype,
+            device=tensor.device,
             low_precision_dtype=self.dtype,
             quantizer=self,
             original_shape=original_shape,
@@ -763,3 +825,50 @@ class Float4Float8CurrentScalingEmulationRefQuantizer(ExperimentalQuantizerBase)
         dst.original_shape = original_shape
 
         return dst
+
+    def make_empty(
+            self,
+            shape: Iterable[int],
+            *,
+            dtype: torch.dtype = torch.float32,
+            device: Optional[torch.device] = None,
+            requires_grad: bool = False,
+    ) -> PerTensorExperimentalQuantizedTensor:
+        assert len(shape) == 2, "shape is not 2d"
+
+        # Canonicalize tensor attributes
+        if device is None:
+            device = torch.device("cuda")
+
+        # Empty scale tensor for fake quantization (data is already dequantized)
+        empty_scale = torch.empty(0)
+
+        # Allocate quantized data
+        qx = torch.empty(shape, dtype=dtype, device=device)
+        sx = empty_scale
+
+        # Allocate quantized data transpose if needed
+        qx_t = None
+        sx_t = None
+        if self.columnwise_usage:
+            inner_dim = qx.size(-1)
+            qx_t = torch.empty(
+                inner_dim,
+                qx.numel() // inner_dim,
+                dtype=dtype,
+                device=device,
+            )
+            sx_t = empty_scale
+
+        # Construct quantized tensor
+        return PerTensorExperimentalQuantizedTensor(
+            data=qx,
+            scale=sx,
+            data_t=qx_t,
+            scale_t=sx_t,
+            dtype=dtype,
+            device=device,
+            low_precision_dtype=self.dtype,
+            quantizer=self,
+            original_shape=shape,
+        )

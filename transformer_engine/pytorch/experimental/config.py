@@ -12,15 +12,7 @@ import torch
 from transformer_engine.pytorch.experimental import utils
 from transformer_engine.pytorch.experimental import quantization
 from transformer_engine.pytorch.experimental import quantization_per_tensor_ref
-
-
-@dataclasses.dataclass(frozen=True)
-class MMParams:
-    """Matrix multiplication parameters."""
-
-    out_dtype: torch.dtype | None = None
-    # Use split accumulator for more accurate FP8 GEMM
-    use_split_accumulator: bool = False
+from transformer_engine.pytorch.experimental.quantization import MMParams
 
 
 @dataclasses.dataclass()
@@ -107,22 +99,38 @@ def get_qlinear_params_from_qat_params(qat_params_idx: int) -> Optional[QLinearP
         return get_qlinear_params_from_predefined(QuantizeRecipe.FP4_CS_EMULATION)
 
 
-def set_qlinear_params(qlinear_params: Optional[QLinearParams]) -> Optional[QLinearParams]:
+def set_qlinear_params(
+    qlinear_params: Optional[QLinearParams] = None,
+    layer_number: Optional[int] = None,
+    layer_name: Optional[str] = None,
+) -> Optional[QLinearParams]:
     """Set quantization parameters based on configuration.
-    
-    TODO: support per-layer quantization parameters.
+
+    Args:
+        qlinear_params: Quantization parameters. If None, loaded from environment.
+        layer_number: The numerical index of this layer in the model structure.
+        layer_name: The name for this layer.
+
+    Returns:
+        QLinearParams: The finalized quantization parameters for this layer.
     """
     if qlinear_params is None:
         qat_params_idx = int(os.getenv("QAT_PARAMS", "0"))
         if qat_params_idx == 0:
             return None
         return get_qlinear_params_from_qat_params(qat_params_idx)
-    
-    # TODO: apply per-layer or other overrides
+
+     # Apply layer-specific overrides
+    if layer_number is not None:
+        raise NotImplementedError("Layer-specific overrides are not supported yet.")
+    if layer_name is not None:
+        raise NotImplementedError("Layer-specific overrides are not supported yet.")
+
     return qlinear_params
 
 
 def get_experimental_quantizers(fp8: bool, qlinear_params: QLinearParams):
+    """Replacement of _get_quantizers() in TE modules."""
     if not fp8:
         raise ValueError("FP8 is required to be enabled for experimental quantization.")
     input_quantizer = qlinear_params.x_quantizer

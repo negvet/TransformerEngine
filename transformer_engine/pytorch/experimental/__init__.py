@@ -4,7 +4,7 @@
 
 """Experimental APIs"""
 
-from .linear import Linear
-# from .layernorm_linear import LayerNormLinear
 
-__all__ = ["Linear"]
+from .config import set_qlinear_params, get_experimental_quantizers
+
+__all__ = ["set_qlinear_params", "get_experimental_quantizers"]
