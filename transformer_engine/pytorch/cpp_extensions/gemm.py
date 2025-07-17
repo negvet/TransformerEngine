@@ -42,7 +42,7 @@ def _experimental_qgemm(
     extra_output: Optional[torch.Tensor] = None,
     bulk_overlap: bool = False,
 ) -> Iterable[Optional[torch.Tensor]]:
-    """Dispatch GEMM to quantizer's qgemm method when A or B are QuantizeResult instances."""
+    """Dispatch GEMM to quantizer's qgemm method when A or B are ExperimentalQuantizedTensor instances."""
     # TODO: refactor this: extract data extraction logic, qgemm logic, etc. into separate functions
     assert isinstance(A, ExperimentalQuantizedTensorBase) and isinstance(B, ExperimentalQuantizedTensorBase), "A and B must be QuantizedExperimentalTensorBase instances"
 
@@ -59,8 +59,9 @@ def _experimental_qgemm(
         else:
             # Default to FPROP for other layouts
             gemm_type = GEMMType.FPROP
-    
-    # Extract quantizer from QuantizeResult
+
+    # Extract quantizer from ExperimentalQuantizedTensor to get qgemm logic
+    # TODO: make it more flexible, what if we might want to use gemm logic from B.quantizer?
     quantizer = None
     if hasattr(A, 'quantizer') and A.quantizer is not None:
         quantizer = A.quantizer
@@ -68,7 +69,7 @@ def _experimental_qgemm(
         quantizer = B.quantizer
     else:
         raise ValueError("No quantizer found in QuantizedExperimentalTensorBase objects")
-    
+
     # Create MMParams
     m_params = MMParams(
         out_dtype=out_dtype,

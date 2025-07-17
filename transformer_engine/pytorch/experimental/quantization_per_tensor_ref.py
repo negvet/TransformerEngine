@@ -47,7 +47,7 @@ class PerTensorExperimentalQuantizedTensor(ExperimentalQuantizedTensorBase):
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """
-        Construct plain PyTorch tensor from QuantizedExperimentalTensorBase
+        Construct plain PyTorch tensor from quantized tensor
         """
         if dtype is None:
             dtype = self.dtype
@@ -101,7 +101,7 @@ class PerTensorExperimentalQuantizedTensor(ExperimentalQuantizedTensorBase):
             needs_data = rowwise_usage
         if columnwise_usage is not None:
             needs_data_transpose = columnwise_usage
-        
+
         # Generate data that is required
         if needs_data and not has_data:
             raise RuntimeError("Cannot generate FP8 data, even from FP8 data transpose")
@@ -128,6 +128,10 @@ class PerTensorExperimentalQuantizedTensor(ExperimentalQuantizedTensorBase):
             return self.data.size(*args, **kwargs)
         size = self.data_t.size(*args, **kwargs)
         return torch.Size([size[-1], math.prod(size[:-1])])
+
+
+class PerTensorExperimentalQuantizer(ExperimentalQuantizerBase):
+    """Per-tensor experimental quantizer"""
 
 
 def _scale_from_amax_tensor(
@@ -188,15 +192,14 @@ def _scale_from_amax_tensor(
     return scale, scale_inv, amax
 
 
-class PerTensorExperimentalQuantizer(ExperimentalQuantizerBase):
-    """Per-tensor experimental quantizer"""
-
-
 class Float8CurrentScalingRefQuantizer(PerTensorExperimentalQuantizer):
     """FP8 quantizer with current scaling"""
 
     """FP8 datatype"""
     dtype: torch.dtype
+    """amax reduction options"""
+    with_amax_reduction: bool
+    amax_reduction_group: Optional[torch.distributed.ProcessGroup]
     """Options about how to quantize the tensor"""
     pow_2_scales: bool
     eps: float
@@ -211,8 +214,14 @@ class Float8CurrentScalingRefQuantizer(PerTensorExperimentalQuantizer):
     ):
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = dtype
+        self.with_amax_reduction = False
+        self.amax_reduction_group = None
         self.pow_2_scales = pow_2_scales
         self.eps = eps
+
+    @property
+    def supports_allgather_fp8(self) -> bool:
+        return True
 
     @classmethod
     def compute_scale(
@@ -241,10 +250,7 @@ class Float8CurrentScalingRefQuantizer(PerTensorExperimentalQuantizer):
     def _quantize(self, tensor: torch.Tensor) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Python implementation of quantization (c++ kernel can be used as an option instead).
-        Fake quantize tensor to FP4/FP8 and back - returns regular tensor.
-        
-        Common quantization logic used by both quantize and update_quantized methods.
-        
+
         Parameters
         ----------
         tensor : torch.Tensor
@@ -259,13 +265,37 @@ class Float8CurrentScalingRefQuantizer(PerTensorExperimentalQuantizer):
             - qx_t: quantized data in column-major order (if columnwise_usage), None otherwise
             - sx_t: empty scale tensor for qx_t (if columnwise_usage), None otherwise
         """
-        # compute scale factor
-        scale, scale_inv, _ = self.compute_scale(
-            tensor,
-            self.dtype,
-            eps=self.eps,
-            pow_2_scales=self.pow_2_scales,
-        )
+        # Handle amax reduction if enabled
+        if self.with_amax_reduction:
+            assert self.amax_reduction_group is not None, "amax_reduction_group must be set when with_amax_reduction is True"
+            
+            # Compute local amax
+            if tensor.numel() == 0:
+                amax = torch.empty(1, dtype=torch.float32, device=tensor.device)
+            else:
+                amax = torch.amax(torch.abs(tensor)).view(1).to(torch.float32)
+            
+            # Reduce amax across all ranks
+            torch.distributed.all_reduce(
+                amax, group=self.amax_reduction_group, op=torch.distributed.ReduceOp.MAX
+            )
+            
+            # Compute scale using the global amax
+            scale, scale_inv, _ = _scale_from_amax_tensor(
+                tensor.dtype,
+                amax=amax,
+                quant_dtype=self.dtype,
+                eps=self.eps,
+                pow_2_scales=self.pow_2_scales,
+            )
+        else:
+            # compute scale factor using local amax
+            scale, scale_inv, _ = self.compute_scale(
+                tensor,
+                self.dtype,
+                eps=self.eps,
+                pow_2_scales=self.pow_2_scales,
+            )
 
         qx: Optional[torch.Tensor] = (tensor.float() * scale).to(self.dtype)
         sx: Optional[torch.Tensor] = scale_inv
@@ -547,6 +577,9 @@ class Float4Float8CurrentScalingEmulationRefQuantizer(PerTensorExperimentalQuant
 
     """FP4/FP8 datatype"""
     dtype: Union[utils.Fp4Formats, torch.dtype]
+    """amax reduction options"""
+    with_amax_reduction: bool
+    amax_reduction_group: Optional[torch.distributed.ProcessGroup]
     """Options about how to quantize the tensor"""
     pow_2_scales: bool
     eps: float
@@ -563,6 +596,12 @@ class Float4Float8CurrentScalingEmulationRefQuantizer(PerTensorExperimentalQuant
         self.dtype = dtype
         self.pow_2_scales = pow_2_scales
         self.eps = eps
+        self.with_amax_reduction = False
+        self.amax_reduction_group = None
+
+    @property
+    def supports_allgather_fp8(self) -> bool:
+        return True
 
     def _cast_to_quantized_format(self, tensor: torch.Tensor) -> torch.Tensor:
         """Cast tensor to quantized format (FP4/FP8) and back to float32"""
@@ -610,14 +649,14 @@ class Float4Float8CurrentScalingEmulationRefQuantizer(PerTensorExperimentalQuant
         """
         Python implementation of quantization (c++ kernel can be used as an option instead).
         Fake quantize tensor to FP4/FP8 and back - returns regular tensor.
-        
+
         Common quantization logic used by both quantize and update_quantized methods.
-        
+
         Parameters
         ----------
         tensor : torch.Tensor
             Input tensor to quantize (should be 2D)
-            
+
         Returns
         -------
         Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]
@@ -627,12 +666,38 @@ class Float4Float8CurrentScalingEmulationRefQuantizer(PerTensorExperimentalQuant
             - qx_t: quantized data in column-major order (if columnwise_usage), None otherwise
             - sx_t: empty scale tensor for qx_t (if columnwise_usage), None otherwise
         """
-        scale, scale_inv, _ = self._compute_scale(tensor)
+        # Handle amax reduction if enabled
+        if self.with_amax_reduction:
+            assert self.amax_reduction_group is not None, "amax_reduction_group must be set when with_amax_reduction is True"
+
+            # Compute local amax
+            tensor_fp32 = tensor.to(torch.float32)
+            if tensor_fp32.numel() == 0:
+                amax = torch.empty(1, dtype=torch.float32, device=tensor.device)
+            else:
+                amax = torch.amax(torch.abs(tensor_fp32)).view(1)
+
+            # Reduce amax across all ranks
+            torch.distributed.all_reduce(
+                amax, group=self.amax_reduction_group, op=torch.distributed.ReduceOp.MAX
+            )
+
+            # Compute scale using the global amax
+            scale, scale_inv, _ = _compute_scale_fp4fp8(
+                tensor.dtype,
+                amax=amax,
+                quant_dtype=self.dtype,
+                eps=self.eps,
+                pow_2_scales=self.pow_2_scales,
+            )
+        else:
+            # Compute scale using local amax
+            scale, scale_inv, _ = self._compute_scale(tensor)
 
         # Initialize outputs
         qx, sx = None, None
         qx_t, sx_t = None, None
-        
+
         # Empty scale tensor for fake quantization (data is already dequantized)
         empty_scale = torch.empty(0)
 

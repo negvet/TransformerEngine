@@ -1393,6 +1393,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
             self._customize_quantizers_float8_blockwise_scaling(fwd, recipe)
         # elif other recipes (mxfp8, etc)
 
+        if self.experimental_qlinear_params is not None:
+            self._customize_experimental_quantizers(fwd)
+
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
         warnings.warn(
@@ -1670,6 +1673,22 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.quantizers["scaling_bwd"][
                     tex.FP8BwdTensors.GRAD_OUTPUT1
                 ].amax_reduction_group = self.tp_group
+
+    def _customize_experimental_quantizers(self, fwd: bool) -> None:
+        if fwd:
+            gather_required = self.sequence_parallel and self.parallel_mode == "column"
+            if gather_required:
+                input_quantizer = self.experimental_qlinear_params.x_quantizer
+                if input_quantizer.supports_allgather_fp8:
+                    input_quantizer.with_amax_reduction = True
+                    input_quantizer.amax_reduction_group = self.tp_group
+        else:
+            gather_required = self.sequence_parallel and self.parallel_mode == "row"
+            if gather_required:
+                grad_output_quantizer = self.experimental_qlinear_params.g_quantizer
+                if grad_output_quantizer.supports_allgather_fp8:
+                    grad_output_quantizer.with_amax_reduction = True
+                    grad_output_quantizer.amax_reduction_group = self.tp_group
 
     def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorBase]]:
         """Get the weight tensors of the module."""
