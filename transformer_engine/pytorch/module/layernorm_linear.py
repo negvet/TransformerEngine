@@ -65,11 +65,10 @@ from ..tensor.quantized_tensor import (
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.utils import any_feature_enabled
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
-from ..tensor.utils import _PER_TENSOR_QUANTIZERS
+from ..tensor.utils import is_per_tensor_quantizer
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 
 from ..cpp_extensions import (
@@ -180,9 +179,7 @@ class _LayerNormLinear(torch.autograd.Function):
             if input_quantizer is None:
                 raise ValueError("Missing quantizer for input tensor")
             input_quantizer.set_usage(rowwise=True, columnwise=backward_needs_input)
-            if with_input_all_gather and isinstance(
-                input_quantizer, _PER_TENSOR_QUANTIZERS
-            ):
+            if with_input_all_gather and is_per_tensor_quantizer(input_quantizer):
                 # All-gather is not supported with FP8 column-wise data
                 input_quantizer.set_usage(columnwise=False)
 
@@ -193,7 +190,7 @@ class _LayerNormLinear(torch.autograd.Function):
             and not debug
             and not return_layernorm_output
             and not return_layernorm_output_gathered
-            and not isinstance(input_quantizer, experimental.quantization.ExperimentalQuantizerBase)
+            and not experimental.quantization.is_experimental(input_quantizer)
         )
 
         # Apply normalization
@@ -633,7 +630,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 quantizer = None
                 if ctx.input_quantizer is not None:
                     quantizer = ctx.input_quantizer
-                    if isinstance(quantizer, _PER_TENSOR_QUANTIZERS):
+                    if is_per_tensor_quantizer(quantizer):
                         # If data is in FP8, we compute FP8 transposes manually
                         quantizer.set_usage(rowwise=True, columnwise=False)
                     else:

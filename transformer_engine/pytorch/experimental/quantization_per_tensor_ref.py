@@ -6,12 +6,13 @@ import math
 import torch
 from typing import Iterable, Tuple, Optional, Union
 
-from transformer_engine.pytorch.experimental.quantization import ExperimentalQuantizerBase, MMParams, GEMMType, ExperimentalQuantizedTensorBase
+from transformer_engine.pytorch.experimental import quantization
+from transformer_engine.pytorch.experimental.quantization import ExperimentalQuantizedTensor, ExperimentalQuantizer
 from transformer_engine.pytorch.experimental import utils
 
 
-class PerTensorExperimentalQuantizedTensor(ExperimentalQuantizedTensorBase):
-    """Experimental quantized tensor container for per-tensor (tensorwise) scaling."""
+class PerTensorQuantizedTensor(ExperimentalQuantizedTensor):
+    """Quantized tensor container for per-tensor (tensorwise) scaling."""
 
     def __repr__(self):
         return (
@@ -29,7 +30,7 @@ class PerTensorExperimentalQuantizedTensor(ExperimentalQuantizedTensorBase):
         tensor: torch.Tensor,
         *,
         noop_flag: Optional[torch.Tensor] = None,
-    ) -> ExperimentalQuantizedTensorBase:
+    ) -> ExperimentalQuantizedTensor:
         """In-place update of quantized data
 
         Parameters
@@ -40,7 +41,7 @@ class PerTensorExperimentalQuantizedTensor(ExperimentalQuantizedTensorBase):
             float32 flag indicating whether to avoid performing update
 
         """
-        if isinstance(tensor, ExperimentalQuantizedTensorBase):
+        if isinstance(tensor, ExperimentalQuantizedTensor):
             return self.quantize_(tensor.dequantize(), noop_flag=noop_flag)
         self.get_quantizer().update_quantized(tensor, self, noop_flag=noop_flag)
         return self
@@ -53,13 +54,13 @@ class PerTensorExperimentalQuantizedTensor(ExperimentalQuantizedTensorBase):
             dtype = self.dtype
 
         # TODO: what to do with data_t ?
-        assert self.data is not None, "QuantizedExperimentalTensor has no valid tensor data"
-        assert self.scale is not None, "QuantizedExperimentalTensor has no valid scale"
+        assert self.data is not None, "QuantizedTensor has no valid tensor data"
+        assert self.scale is not None, "QuantizedTensor has no valid scale"
         tensor_data = self.data
         tensor_scale = self.scale
         return self.get_quantizer().dequantize(tensor_data, tensor_scale, dtype=dtype)
 
-    def get_quantizer(self) -> ExperimentalQuantizerBase:
+    def get_quantizer(self) -> ExperimentalQuantizer:
         """Get builder for QuantizedExperimentalTensor
 
         Quantizer can be used for in-place operations.
@@ -69,7 +70,7 @@ class PerTensorExperimentalQuantizedTensor(ExperimentalQuantizedTensorBase):
             return self.quantizer
         raise ValueError("Quantizer is not set")
 
-    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], ExperimentalQuantizedTensorBase]:
+    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], ExperimentalQuantizedTensor]:
         """Prepare the quantization result for saving for backward"""
         tensors = [self.data, self.data_t, self.scale, self.scale_t]
         self.data = None
@@ -130,69 +131,7 @@ class PerTensorExperimentalQuantizedTensor(ExperimentalQuantizedTensorBase):
         return torch.Size([size[-1], math.prod(size[:-1])])
 
 
-class PerTensorExperimentalQuantizer(ExperimentalQuantizerBase):
-    """Per-tensor experimental quantizer"""
-
-
-def _scale_from_amax_tensor(
-    x_dtype: torch.dtype,
-    amax: torch.Tensor,
-    quant_dtype: torch.dtype,
-    *,
-    eps: float,
-    pow_2_scales: bool,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Derives quantization and dequantization from amax and options.
-
-    Reference implementation for scale calculation.
-
-    Returns:
-    - scale: quantization scales
-    - scale_inv: dequantization scales
-    - amax: Amax tensor with updates made for extrema values.
-    """
-    assert amax.dtype == torch.float, "amax must be a float tensor."
-    fp8_max = torch.finfo(quant_dtype).max
-    # Clamping amax to avoid division by small numbers
-    amax = torch.max(amax, torch.tensor(eps))
-
-    # Compute scale factor
-    scale = torch.div(fp8_max, amax)
-    # Note frexp doesn't give back inf for exponent with an inf input
-    # We take care of inf before pow_2_scales
-    scale = torch.where(scale == torch.inf, torch.finfo(x_dtype).max, scale)
-    if pow_2_scales:
-        # Calculate rounded down exponent
-        _, exp = torch.frexp(scale)
-        # Positive numbers are always returned as mant, exp with
-        # a mantissa in [0.5, 1.0). Because a normal float has a mantissa with
-        # hidden bit in [1.0, 2.0), the exponent will be off by exactly one because
-        # of the shift. Subnormal and zero cases need not be considered because
-        # the smallest possible result of fp8_max / amax is still normal.
-        exp = exp - 1
-        # No subnormals and zero.
-        assert (exp > -127).all()
-        # TODO: If/when adding a URM option an option is to cap to 126
-        # rather than allowing the full range of FP32 (2 - 2^23) x 2^127
-        # addresses cases where adding a mantissa overflows into inf scales.
-        # Not necessary currently without additional scale smudging options.
-        unity = torch.tensor([1.0], device=exp.device)
-        torch.ldexp(unity, exp, out=scale)
-        # Case where amax is inf. The frexp, ldexp logic changes 0.0 scales
-        # Return 0.0 for 0.0 scale for consistency with non-pow2 scale
-        # calculation.
-        scale = torch.where(amax == float("inf"), 0.0, scale)
-
-    # Handle overflow cases for amax zero causing NaN
-    scale = torch.where(amax == 0, 1.0, scale)
-
-    # Compute scale_inv
-    scale_inv = torch.reciprocal(scale)
-
-    return scale, scale_inv, amax
-
-
-class Float8CurrentScalingRefQuantizer(PerTensorExperimentalQuantizer):
+class QuantizerFP8PerTensorRef(ExperimentalQuantizer):
     """FP8 quantizer with current scaling"""
 
     """FP8 datatype"""
@@ -219,9 +158,19 @@ class Float8CurrentScalingRefQuantizer(PerTensorExperimentalQuantizer):
         self.pow_2_scales = pow_2_scales
         self.eps = eps
 
+        self.supported_scaling_types = (quantization.ScalingType.PER_TENSOR,)
+
     @property
     def supports_allgather_fp8(self) -> bool:
         return True
+
+    @property
+    def supports_dequantize(self) -> bool:
+        return True
+
+    @property
+    def is_data_t_transposed_in_memory(self) -> bool:
+        raise NotImplementedError("Not implemented yet")
 
     @classmethod
     def compute_scale(
@@ -239,7 +188,7 @@ class Float8CurrentScalingRefQuantizer(PerTensorExperimentalQuantizer):
         else:
             amax = torch.amax(torch.abs(x_fp32)).view(1)
 
-        return _scale_from_amax_tensor(
+        return quantization._scale_from_amax_tensor(
             x.dtype,
             amax=amax,
             quant_dtype=quant_dtype,
@@ -281,7 +230,7 @@ class Float8CurrentScalingRefQuantizer(PerTensorExperimentalQuantizer):
             )
             
             # Compute scale using the global amax
-            scale, scale_inv, _ = _scale_from_amax_tensor(
+            scale, scale_inv, _ = quantization._scale_from_amax_tensor(
                 tensor.dtype,
                 amax=amax,
                 quant_dtype=self.dtype,
@@ -314,49 +263,62 @@ class Float8CurrentScalingRefQuantizer(PerTensorExperimentalQuantizer):
 
         return qx, sx, qx_t, sx_t
 
-    def quantize(self, tensor: torch.Tensor, **kwargs) -> PerTensorExperimentalQuantizedTensor:
-        """Quantize tensor"""
-        original_shape = tensor.shape
-        if tensor.ndim > 2:
-            tensor = tensor.view(-1, tensor.shape[-1])
+    def quantize(
+        self,
+        x: torch.Tensor,
+        **kwargs,
+    ):
+        # sanity checks
+        assert x.dtype in utils.HIGH_PRECISION_FLOAT_DTYPES, "Unsupported input dtype."
 
-        # sanity check
-        assert tensor.dtype in utils.HIGH_PRECISION_FLOAT_DTYPES, "Unsupported input dtype."
+        # Make it work with 3D tensors
+        original_shape = x.shape
+        if x.ndim > 2:
+            x = x.view(-1, x.shape[-1])
 
-        qx, sx, qx_t, sx_t = self._quantize(tensor)
+        qx, sx, qx_t, sx_t = self._quantize(x)
 
-        return PerTensorExperimentalQuantizedTensor(
+        return PerTensorQuantizedTensor(
             data=qx,
             scale=sx,
             data_t=qx_t,
             scale_t=sx_t,
-            dtype=tensor.dtype,
-            device=tensor.device,
+            dtype=x.dtype,
+            device=x.device,
             low_precision_dtype=self.dtype,
             quantizer=self,
             original_shape=original_shape,
         )
 
-    def dequantize(self, tensor: torch.Tensor, scale: torch.Tensor, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
-        """Dequantize the quantized tensor"""
-        return (tensor.to(torch.float32) * scale).to(dtype)
+    def dequantize(
+        self,
+        x: torch.Tensor,
+        sx: torch.Tensor,
+        is_data_t: bool = False,
+        dq_dtype: torch.dtype = torch.bfloat16,
+        dq_layout: quantization.DequantizeLayout = quantization.DequantizeLayout.AS_ORIGINAL,
+    ) -> Tuple[torch.Tensor, bool]:
+        dq_data = (x.to(torch.float32) * sx).to(dq_dtype)
+        if dq_layout == quantization.DequantizeLayout.AS_ORIGINAL and is_data_t:
+            return dq_data.t().contiguous(), False
+        else:
+            return dq_data, is_data_t
 
     def qgemm(
         self,
         qx: torch.Tensor,
         qw: torch.Tensor,
-        m_params: MMParams,
+        m_params: quantization.MMParams,
         out_dtype: torch.dtype,
         sx: torch.Tensor,
         sw: torch.Tensor,
         bias: torch.Tensor | None = None,
         out: torch.Tensor | None = None,
         accumulate: bool = False,
-        gemm_type: GEMMType = GEMMType.FPROP,
-        qresult_x: ExperimentalQuantizedTensorBase | None = None,
-        qresult_w: ExperimentalQuantizedTensorBase | None = None,
+        gemm_type: quantization.GEMMType = quantization.GEMMType.FPROP,
+        qresult_x: quantization.ExperimentalQuantizedTensor | None = None,
+        qresult_w: quantization.ExperimentalQuantizedTensor | None = None,
     ) -> torch.Tensor:
-        """Quantized GEMM interface."""
         M, K = qx.shape
         N, K_B = qw.shape
 
@@ -403,21 +365,35 @@ class Float8CurrentScalingRefQuantizer(PerTensorExperimentalQuantizer):
 
         return y
 
+    def transpose_qresult(
+        self, qresult: quantization.ExperimentalQuantizedTensor
+    ) -> quantization.ExperimentalQuantizedTensor:
+        qx = qresult.data
+        scale = qresult.scale
+        assert qresult.data_t is None
+        assert qresult.scale_t is None
+        assert qx is not None
+        qx_t = qx.transpose(-2, -1).contiguous()
+        scale_t = scale
+        qresult.data_t = qx_t
+        qresult.scale_t = scale_t
+        return qresult
+
     def update_quantized(
         self,
         src: torch.Tensor,
-        dst: ExperimentalQuantizedTensorBase,
+        dst: ExperimentalQuantizedTensor,
         *,
         noop_flag: Optional[torch.Tensor] = None,
-    ) -> ExperimentalQuantizedTensorBase:
+    ) -> ExperimentalQuantizedTensor:
         """Update the quantized tensor with the given tensor in-place
 
         Parameters
         ----------
         src: torch.Tensor
             Source tensor to copy from
-        dst: QuantizedExperimentalTensorBase
-            Destination QuantizedExperimentalTensorBase to update
+        dst: ExperimentalQuantizedTensor
+            Destination ExperimentalQuantizedTensor to update
         noop_flag: torch.Tensor, optional
             float32 flag indicating whether to avoid performing update
         """
@@ -454,15 +430,12 @@ class Float8CurrentScalingRefQuantizer(PerTensorExperimentalQuantizer):
             dtype: torch.dtype = torch.float32,
             device: Optional[torch.device] = None,
             requires_grad: bool = False,
-    ) -> PerTensorExperimentalQuantizedTensor:
+    ) -> PerTensorQuantizedTensor:
         assert len(shape) == 2, "shape is not 2d"
 
         # Canonicalize tensor attributes
         if device is None:
             device = torch.device("cuda")
-
-        # Empty scale tensor for fake quantization (data is already dequantized)
-        empty_scale = torch.empty(0)
 
         # Allocate quantized data
         qx = torch.empty(shape, dtype=self.dtype, device=device)
@@ -476,13 +449,13 @@ class Float8CurrentScalingRefQuantizer(PerTensorExperimentalQuantizer):
             qx_t = torch.empty(
                 inner_dim,
                 qx.numel() // inner_dim,
-                dtype=torch.uint8,
+                dtype=self.dtype,
                 device=device,
             )
             sx_t = torch.empty(1, dtype=torch.float32, device=device)
 
         # Construct quantized tensor
-        return PerTensorExperimentalQuantizedTensor(
+        return PerTensorQuantizedTensor(
             data=qx,
             scale=sx,
             data_t=qx_t,
@@ -495,84 +468,7 @@ class Float8CurrentScalingRefQuantizer(PerTensorExperimentalQuantizer):
         )
 
 
-def _compute_scale_fp4fp8(
-    x_dtype: torch.dtype,
-    amax: torch.Tensor,
-    quant_dtype: Union[utils.Fp4Formats, torch.dtype],  # FP4 format enum or FP8 torch.dtype
-    *,
-    eps: float,
-    pow_2_scales: bool,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Derives quantization and dequantization scales from amax for FP4/FP8 formats.
-
-    Reference implementation for scale calculation.
-    This does not follow recommended implementation when decoding factor is calculated first.
-    This follows the implementation in kitchen/quantization.py::_scale_from_amax_tensor.
-    The same approach is used for FP4 and FP8 per tensor quantization.
-
-    Returns:
-    - scale: quantization scales
-    - scale_inv: dequantization scales
-    - amax: Amax tensor with updates made for extrema values.
-    """
-    assert amax.dtype == torch.float, "amax must be a float tensor."
-    assert quant_dtype in utils.FP4_DTYPES + utils.FP8_DTYPES, f"Unsupported quant dtype {quant_dtype}."
-
-    # Clamping amax to avoid division by small numbers
-    amax = torch.max(amax, torch.tensor(eps))
-
-    # Get max values for different dtypes
-    if quant_dtype in utils.FP4_DTYPES:
-        # FP4 max values
-        if quant_dtype == utils.Fp4Formats.E2M1:
-            max_value = utils.FP4_E2M1_MAXVAL
-        elif quant_dtype == utils.Fp4Formats.E0M3:
-            max_value = utils.FP4_E0M3_MAXVAL
-        elif quant_dtype == utils.Fp4Formats.E3M0:
-            max_value = utils.FP4_E3M0_MAXVAL
-        else:
-            raise ValueError(f"Unsupported FP4 quant_dtype {quant_dtype}")
-    elif quant_dtype in utils.FP8_DTYPES:
-        # FP8 max values
-        max_value = torch.finfo(quant_dtype).max
-    else:
-        raise ValueError(f"Unsupported quant_dtype {quant_dtype}")
-
-    # Compute scale factor
-    scale = torch.div(max_value, amax)
-
-    # Note frexp doesn't give back inf for exponent with an inf input
-    # We take care of inf before pow_2_scales
-    scale = torch.where(scale == torch.inf, torch.finfo(x_dtype).max, scale)
-
-    if pow_2_scales:
-        # Calculate rounded down exponent
-        _, exp = torch.frexp(scale)
-        # Positive numbers are always returned as mant, exp with
-        # a mantissa in [0.5, 1.0). Because a normal float has a mantissa with
-        # hidden bit in [1.0, 2.0), the exponent will be off by exactly one because
-        # of the shift. Subnormal and zero cases need not be considered because
-        # the smallest possible result of fp8_max / amax is still normal.
-        exp = exp - 1
-        # No subnormals and zero.
-        assert (exp > -127).all()
-        unity = torch.tensor([1.0], device=exp.device)
-        torch.ldexp(unity, exp, out=scale)
-        # Case where amax is inf. The frexp, ldexp logic changes 0.0 scales
-        # Return 0.0 for 0.0 scale for consistency with non-pow2 scale
-        # calculation.
-        scale = torch.where(amax == float("inf"), 0.0, scale)
-
-    # Handle overflow cases for amax zero causing NaN
-    scale = torch.where(amax == 0, 1.0, scale)
-
-    # Compute scale_inv
-    scale_inv = torch.reciprocal(scale)
-
-    return scale, scale_inv, amax
-
-
-class Float4Float8CurrentScalingEmulationRefQuantizer(PerTensorExperimentalQuantizer):
+class QuantizerFP8FP4PerTensorEmulation(ExperimentalQuantizer):
     """FP4/FP8 quantizer with current scaling and fake quantization"""
 
     """FP4/FP8 datatype"""
@@ -594,10 +490,12 @@ class Float4Float8CurrentScalingEmulationRefQuantizer(PerTensorExperimentalQuant
     ):
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = dtype
-        self.pow_2_scales = pow_2_scales
-        self.eps = eps
         self.with_amax_reduction = False
         self.amax_reduction_group = None
+        self.pow_2_scales = pow_2_scales
+        self.eps = eps
+
+        self.supported_scaling_types = (quantization.ScalingType.PER_TENSOR,)
 
     @property
     def supports_allgather_fp8(self) -> bool:
@@ -637,7 +535,7 @@ class Float4Float8CurrentScalingEmulationRefQuantizer(PerTensorExperimentalQuant
         else:
             amax = torch.amax(torch.abs(x_fp32)).view(1)
 
-        return _compute_scale_fp4fp8(
+        return quantization._compute_scale_fp4fp8(
             x.dtype,
             amax=amax,
             quant_dtype=self.dtype,
@@ -683,7 +581,7 @@ class Float4Float8CurrentScalingEmulationRefQuantizer(PerTensorExperimentalQuant
             )
 
             # Compute scale using the global amax
-            scale, scale_inv, _ = _compute_scale_fp4fp8(
+            scale, scale_inv, _ = quantization._compute_scale_fp4fp8(
                 tensor.dtype,
                 amax=amax,
                 quant_dtype=self.dtype,
@@ -720,15 +618,16 @@ class Float4Float8CurrentScalingEmulationRefQuantizer(PerTensorExperimentalQuant
 
         return qx, sx, qx_t, sx_t
 
-    def quantize(self, tensor: torch.Tensor, **kwargs) -> PerTensorExperimentalQuantizedTensor:
+    def quantize(self, tensor: torch.Tensor, **kwargs) -> PerTensorQuantizedTensor:
         """Quantize tensor"""
+        # Make it work with 3D tensors
         original_shape = tensor.shape
         if tensor.ndim > 2:
             tensor = tensor.view(-1, tensor.shape[-1])
 
         qx, sx, qx_t, sx_t = self._quantize(tensor)
 
-        return PerTensorExperimentalQuantizedTensor(
+        return PerTensorQuantizedTensor(
             data=qx,
             scale=sx,
             data_t=qx_t,
@@ -751,16 +650,16 @@ class Float4Float8CurrentScalingEmulationRefQuantizer(PerTensorExperimentalQuant
         self,
         qx: torch.Tensor,
         qw: torch.Tensor,
-        m_params: MMParams,
+        m_params: quantization.MMParams,
         out_dtype: torch.dtype,
         sx: torch.Tensor,
         sw: torch.Tensor,
         bias: torch.Tensor | None = None,
         out: torch.Tensor | None = None,
         accumulate: bool = False,
-        gemm_type: GEMMType = GEMMType.FPROP,
-        qresult_x: ExperimentalQuantizedTensorBase | None = None,
-        qresult_w: ExperimentalQuantizedTensorBase | None = None,
+        gemm_type: quantization.GEMMType = quantization.GEMMType.FPROP,
+        qresult_x: quantization.ExperimentalQuantizedTensor | None = None,
+        qresult_w: quantization.ExperimentalQuantizedTensor | None = None,
     ) -> torch.Tensor:
         """Quantized GEMM interface."""
         assert (
@@ -777,10 +676,10 @@ class Float4Float8CurrentScalingEmulationRefQuantizer(PerTensorExperimentalQuant
         assert sw.numel() == 0, "FP4/FP8 emulation should have empty scale tensors"
 
         # Extract dimensions based on GEMM type
-        if gemm_type == GEMMType.FPROP:
+        if gemm_type == quantization.GEMMType.FPROP:
             M, K = qx.shape  # qx: (M, K)
             N, K_B = qw.shape  # qw: (N, K)
-        elif gemm_type == GEMMType.DGRAD:
+        elif gemm_type == quantization.GEMMType.DGRAD:
             M, N = qx.shape  # qx: (M, N) - dY
             K, N_B = qw.shape  # qw: (K, N) - W.t() (transposed weight)
             assert N == N_B, f"Shape mismatch: qx has N={N}, qw has N={N_B}"
@@ -796,18 +695,18 @@ class Float4Float8CurrentScalingEmulationRefQuantizer(PerTensorExperimentalQuant
                 y = out
             else:
                 # Create output with correct shape based on GEMM type
-                if gemm_type == GEMMType.FPROP:
+                if gemm_type == quantization.GEMMType.FPROP:
                     y = torch.zeros((M, N), dtype=out_dtype, device=qx.device)
-                elif gemm_type == GEMMType.DGRAD:
+                elif gemm_type == quantization.GEMMType.DGRAD:
                     y = torch.zeros((M, K), dtype=out_dtype, device=qx.device)
                 else:  # WGRAD
                     y = torch.zeros((N, K), dtype=out_dtype, device=qx.device)
             # Only add bias if we have valid dimensions for GEMM  
-            if bias is not None and gemm_type == GEMMType.FPROP and K > 0:
+            if bias is not None and gemm_type == quantization.GEMMType.FPROP and K > 0:
                 y += bias
             return y
 
-        if gemm_type == GEMMType.FPROP:
+        if gemm_type == quantization.GEMMType.FPROP:
             # fwd:    Y = x @ w.t()  # [m, k] x [k, n] = [m, n]
             if bias is not None:
                 if out_dtype == torch.float32:
@@ -817,11 +716,11 @@ class Float4Float8CurrentScalingEmulationRefQuantizer(PerTensorExperimentalQuant
                     y = torch.addmm(bias, qx, qw.t(), beta=1, alpha=1)
             else:
                 y = torch.matmul(qx, qw.t())
-        elif gemm_type == GEMMType.DGRAD:
+        elif gemm_type == quantization.GEMMType.DGRAD:
             # dgrad: dX = dY @ W     # [m, n] x [n, k] = [m, k]
             # Note: qw is W.t() from linear.py, so we transpose to get W  
             y = torch.matmul(qx, qw.t())
-        elif gemm_type == GEMMType.WGRAD:
+        elif gemm_type == quantization.GEMMType.WGRAD:
             # wgrad: dW = dY.t() @ X # [n, m] x [m, k] = [n, k]
             # Note: qx is dY.t() with shape (N, M), qw is X.t() with shape (K, M)
             # So we need qw.t() to get X from X.t()
@@ -840,7 +739,7 @@ class Float4Float8CurrentScalingEmulationRefQuantizer(PerTensorExperimentalQuant
             raise NotImplementedError(f"Unsupported GEMM type: {gemm_type}")
 
         # Handle accumulation for non-WGRAD cases
-        if accumulate and gemm_type != GEMMType.WGRAD:
+        if accumulate and gemm_type != quantization.GEMMType.WGRAD:
             assert out is not None, "Output tensor must be provided for accumulation."
             out.add_(y.to(out.dtype))
             y = out
@@ -850,10 +749,10 @@ class Float4Float8CurrentScalingEmulationRefQuantizer(PerTensorExperimentalQuant
     def update_quantized(
         self,
         src: torch.Tensor,
-        dst: ExperimentalQuantizedTensorBase,
+        dst: ExperimentalQuantizedTensor,
         *,
         noop_flag: Optional[torch.Tensor] = None,
-    ) -> ExperimentalQuantizedTensorBase:
+    ) -> ExperimentalQuantizedTensor:
         """Update the quantized tensor with the given tensor in-place
 
         Parameters
@@ -898,7 +797,7 @@ class Float4Float8CurrentScalingEmulationRefQuantizer(PerTensorExperimentalQuant
             dtype: torch.dtype = torch.float32,
             device: Optional[torch.device] = None,
             requires_grad: bool = False,
-    ) -> PerTensorExperimentalQuantizedTensor:
+    ) -> PerTensorQuantizedTensor:
         assert len(shape) == 2, "shape is not 2d"
 
         # Canonicalize tensor attributes
@@ -926,7 +825,7 @@ class Float4Float8CurrentScalingEmulationRefQuantizer(PerTensorExperimentalQuant
             sx_t = empty_scale
 
         # Construct quantized tensor
-        return PerTensorExperimentalQuantizedTensor(
+        return PerTensorQuantizedTensor(
             data=qx,
             scale=sx,
             data_t=qx_t,

@@ -8,7 +8,7 @@ import torch
 import transformer_engine_torch as tex
 from transformer_engine_torch import multi_tensor_scale, multi_tensor_compute_scale_and_scale_inv
 
-from .quantized_tensor import QuantizedTensor
+from .quantized_tensor import QuantizedTensor, Quantizer
 from .float8_tensor import Float8Tensor, Float8Quantizer, Float8CurrentScalingQuantizer
 from .mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from .float8_blockwise_tensor import Float8BlockwiseQTensor, Float8BlockQuantizer
@@ -19,8 +19,23 @@ from .. import experimental
 _PER_TENSOR_QUANTIZERS = (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
-    experimental.quantization_per_tensor_ref.PerTensorExperimentalQuantizer,
 )
+
+
+def is_per_tensor_quantizer(quantizer: Quantizer) -> bool:
+    """Check if a quantizer is per-tensor"""
+    return isinstance(quantizer, _PER_TENSOR_QUANTIZERS) or (
+        experimental.quantization.is_experimental(quantizer)
+        and experimental.quantization.ScalingType.PER_TENSOR in quantizer.supported_scaling_types
+    )
+
+
+def is_per_tensor_quantized_tensor(tensor: QuantizedTensor) -> bool:
+    """Check if a quantized tensor is per-tensor"""
+    return isinstance(tensor, Float8Tensor) or (
+        experimental.quantization.is_experimental(tensor)
+        and experimental.quantization.ScalingType.PER_TENSOR in tensor.get_quantizer().supported_scaling_types
+    )
 
 
 def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):

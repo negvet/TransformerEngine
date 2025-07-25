@@ -21,9 +21,9 @@ class QLinearParams:
 
     Contains ready-to-use quantizers for input (x), weight (w), and gradient (g) tensors.
     """
-    x_quantizer: Optional[quantization.ExperimentalQuantizerBase] = None
-    w_quantizer: Optional[quantization.ExperimentalQuantizerBase] = None
-    g_quantizer: Optional[quantization.ExperimentalQuantizerBase] = None
+    x_quantizer: Optional[quantization.ExperimentalQuantizer] = None
+    w_quantizer: Optional[quantization.ExperimentalQuantizer] = None
+    g_quantizer: Optional[quantization.ExperimentalQuantizer] = None
 
     mm_fprop: Optional[MMParams] = None
     mm_dgrad: Optional[MMParams] = None
@@ -35,7 +35,7 @@ class QuantizeRecipe(enum.Enum):
     """Pre-defined quantization recipes for linear layers."""
 
     NON_QUANTIZE = "non_quantize"
-    FP8_CS = "fp8_current_scaling"
+    FP8_CS_REF = "fp8_current_scaling_ref"
     FP8_CS_EMULATION = "fp8_current_scaling_emulation"
     FP4_CS_EMULATION = "fp4_current_scaling_emulation"
 
@@ -46,39 +46,39 @@ def get_qlinear_params_from_predefined(
     """Get quantization parameters for linear layer based on recipe."""
     if recipe == QuantizeRecipe.NON_QUANTIZE:
         return None
-    elif recipe == QuantizeRecipe.FP8_CS:
+    elif recipe == QuantizeRecipe.FP8_CS_REF:
         return QLinearParams(
-            x_quantizer=quantization_per_tensor_ref.Float8CurrentScalingRefQuantizer(
+            x_quantizer=quantization_per_tensor_ref.QuantizerFP8PerTensorRef(
                 dtype=torch.float8_e4m3fn,
             ),
-            w_quantizer=quantization_per_tensor_ref.Float8CurrentScalingRefQuantizer(
+            w_quantizer=quantization_per_tensor_ref.QuantizerFP8PerTensorRef(
                 dtype=torch.float8_e4m3fn,
             ),
-            g_quantizer=quantization_per_tensor_ref.Float8CurrentScalingRefQuantizer(
+            g_quantizer=quantization_per_tensor_ref.QuantizerFP8PerTensorRef(
                 dtype=torch.float8_e5m2,
             ),
         )
     elif recipe == QuantizeRecipe.FP8_CS_EMULATION:
         return QLinearParams(
-            x_quantizer=quantization_per_tensor_ref.Float4Float8CurrentScalingEmulationRefQuantizer(
+            x_quantizer=quantization_per_tensor_ref.QuantizerFP8FP4PerTensorEmulation(
                 dtype=torch.float8_e4m3fn,
             ),
-            w_quantizer=quantization_per_tensor_ref.Float4Float8CurrentScalingEmulationRefQuantizer(
+            w_quantizer=quantization_per_tensor_ref.QuantizerFP8FP4PerTensorEmulation(
                 dtype=torch.float8_e4m3fn,
             ),
-            g_quantizer=quantization_per_tensor_ref.Float4Float8CurrentScalingEmulationRefQuantizer(
+            g_quantizer=quantization_per_tensor_ref.QuantizerFP8FP4PerTensorEmulation(
                 dtype=torch.float8_e5m2,
             ),
         )
     elif recipe == QuantizeRecipe.FP4_CS_EMULATION:
         return QLinearParams(
-            x_quantizer=quantization_per_tensor_ref.Float4Float8CurrentScalingEmulationRefQuantizer(
+            x_quantizer=quantization_per_tensor_ref.QuantizerFP8FP4PerTensorEmulation(
                 dtype=utils.Fp4Formats.E2M1,
             ),
-            w_quantizer=quantization_per_tensor_ref.Float4Float8CurrentScalingEmulationRefQuantizer(
+            w_quantizer=quantization_per_tensor_ref.QuantizerFP8FP4PerTensorEmulation(
                 dtype=utils.Fp4Formats.E2M1,
             ),
-            g_quantizer=quantization_per_tensor_ref.Float4Float8CurrentScalingEmulationRefQuantizer(
+            g_quantizer=quantization_per_tensor_ref.QuantizerFP8FP4PerTensorEmulation(
                 dtype=utils.Fp4Formats.E2M1,
             ),
         )
@@ -91,11 +91,11 @@ def get_qlinear_params_from_qat_params(qat_params_idx: int) -> Optional[QLinearP
 
     if qat_params_idx == 1:
         return get_qlinear_params_from_predefined(QuantizeRecipe.NON_QUANTIZE)
-    if qat_params_idx == 2:
-        return get_qlinear_params_from_predefined(QuantizeRecipe.FP8_CS)
     if qat_params_idx == 2001:
-        return get_qlinear_params_from_predefined(QuantizeRecipe.FP8_CS_EMULATION)
+        return get_qlinear_params_from_predefined(QuantizeRecipe.FP8_CS_REF)
     if qat_params_idx == 2002:
+        return get_qlinear_params_from_predefined(QuantizeRecipe.FP8_CS_EMULATION)
+    if qat_params_idx == 2003:
         return get_qlinear_params_from_predefined(QuantizeRecipe.FP4_CS_EMULATION)
 
 

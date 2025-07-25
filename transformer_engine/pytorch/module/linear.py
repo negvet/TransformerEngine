@@ -68,7 +68,7 @@ from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantize
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
-from ..tensor.utils import _PER_TENSOR_QUANTIZERS
+from ..tensor.utils import is_per_tensor_quantizer
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.utils import any_feature_enabled
@@ -166,7 +166,7 @@ class _Linear(torch.autograd.Function):
                     raise ValueError("Missing quantizer for input tensor")
                 if not isinstance(inputmat, QuantizedTensorBase):
                     input_quantizer.set_usage(rowwise=True, columnwise=backward_needs_input)
-                    if isinstance(input_quantizer, _PER_TENSOR_QUANTIZERS):
+                    if is_per_tensor_quantizer(input_quantizer):
                         # All-gather is not supported with FP8 column-wise data
                         input_quantizer.set_usage(columnwise=False)
                     inputmat = input_quantizer(inputmat)
@@ -553,7 +553,7 @@ class _Linear(torch.autograd.Function):
                 quantizer = None
                 if ctx.fp8 or ctx.debug:
                     quantizer = ctx.input_quantizer
-                    if isinstance(quantizer, _PER_TENSOR_QUANTIZERS):
+                    if is_per_tensor_quantizer(quantizer):
                         # If data is in FP8, we compute FP8 transposes manually
                         quantizer.set_usage(rowwise=True, columnwise=False)
                     else:

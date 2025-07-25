@@ -14,7 +14,7 @@ from ..utils import get_sm_count, _empty_tensor
 from ..tensor.quantized_tensor import Quantizer
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ...debug.pytorch.debug_quantization import DebugQuantizer
-from ..experimental.quantization import ExperimentalQuantizedTensorBase, GEMMType, MMParams
+from ..experimental.quantization import ExperimentalQuantizedTensor, GEMMType, MMParams, is_experimental
 
 
 __all__ = [
@@ -24,8 +24,8 @@ __all__ = [
 
 
 def _experimental_qgemm(
-    A: ExperimentalQuantizedTensorBase,
-    B: ExperimentalQuantizedTensorBase,
+    A: ExperimentalQuantizedTensor,
+    B: ExperimentalQuantizedTensor,
     workspace: torch.Tensor,
     out_dtype: Optional[torch.dtype] = None,
     quantization_params: Optional[Quantizer] = None,
@@ -43,8 +43,8 @@ def _experimental_qgemm(
     bulk_overlap: bool = False,
 ) -> Iterable[Optional[torch.Tensor]]:
     """Dispatch GEMM to quantizer's qgemm method when A or B are ExperimentalQuantizedTensor instances."""
-    # TODO: refactor this: extract data extraction logic, qgemm logic, etc. into separate functions
-    assert isinstance(A, ExperimentalQuantizedTensorBase) and isinstance(B, ExperimentalQuantizedTensorBase), "A and B must be QuantizedExperimentalTensorBase instances"
+    # TODO: refactor this: extract data extraction logic, qgemm logic, etc. into separate functions?
+    assert isinstance(A, ExperimentalQuantizedTensor) and isinstance(B, ExperimentalQuantizedTensor), "A and B must be ExperimentalQuantizedTensor instances"
 
     A, B = B, A
 
@@ -195,8 +195,8 @@ def general_gemm(
         if not out.is_contiguous():
             raise ValueError("Output tensor is not contiguous.")
 
-    # If A or B are QuantizedExperimentalTensorBase instances -> dispatch to experimental qgemm
-    if (isinstance(A, ExperimentalQuantizedTensorBase) or isinstance(B, ExperimentalQuantizedTensorBase)):
+    # If A or B are ExperimentalQuantizedTensor instances -> dispatch to experimental qgemm
+    if is_experimental(A) or is_experimental(B):
         return _experimental_qgemm(
             A, B, workspace, out_dtype, quantization_params, gelu, gelu_in, 
             accumulate, layout, out, bias, use_split_accumulator, grad, 
