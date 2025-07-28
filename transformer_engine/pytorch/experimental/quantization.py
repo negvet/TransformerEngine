@@ -273,7 +273,7 @@ class ExperimentalQuantizedTensor(QuantizedTensorBase):
         nominal tensor datatype.
     device: torch.device
         device of the tensor.
-    low_precision_dtype: Union[utils.Fp4Formats, torch.dtype]
+    quant_dtype: Union[utils.Fp4Formats, torch.dtype]
         low precision tensor datatype.
     original_shape: Tuple[int, ...]
         original shape of the tensor.
@@ -285,10 +285,11 @@ class ExperimentalQuantizedTensor(QuantizedTensorBase):
     scale: Optional[torch.Tensor] = None
     data_t: Optional[torch.Tensor] = None
     scale_t: Optional[torch.Tensor] = None
+    global_amax: Optional[torch.Tensor] = None
 
     dtype: Optional[torch.dtype] = None
     device: Optional[torch.device] = None
-    low_precision_dtype: Optional[Union[utils.Fp4Formats, torch.dtype]] = None
+    quant_dtype: Optional[Union[utils.Fp4Formats, torch.dtype]] = None
     original_shape: Optional[Tuple[int, ...]] = None
     quantizer: Optional[ExperimentalQuantizer] = None
 
@@ -296,6 +297,39 @@ class ExperimentalQuantizedTensor(QuantizedTensorBase):
     def experimental(self) -> bool:
         """Flag for upstreaming to TE"""
         return True
+
+    def get_quantizer(self) -> ExperimentalQuantizer:
+        """Get builder for QuantizedExperimentalTensor
+
+        Quantizer can be used for in-place operations.
+
+        """
+        if self.quantizer is not None:
+            return self.quantizer
+        raise ValueError("Quantizer is not set")
+
+    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], ExperimentalQuantizedTensor]:
+        """Prepare the quantization result for saving for backward"""
+        tensors = [self.data, self.data_t, self.scale, self.scale_t]
+        self.data = None
+        self.data_t = None
+        self.scale = None
+        self.scale_t = None
+        return tensors, self
+
+    def restore_from_saved(self, tensors: list[Optional[torch.Tensor]]) -> list[Optional[torch.Tensor]]:
+        """Restore the quantization result from the saved tensors"""
+        self.data = tensors[0]
+        self.data_t = tensors[1]
+        self.scale = tensors[2]
+        self.scale_t = tensors[3]
+        return tensors[4:]
+
+    def dequantize(self, *args, **kwargs) -> torch.Tensor:
+        """Dequantize the quantized tensor"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement dequantize function"
+        )
 
     # Compatibility
     @property
@@ -347,6 +381,18 @@ class ExperimentalQuantizer(Quantizer):
         qresult_w: ExperimentalQuantizedTensor | None = None,
     ) -> torch.Tensor:
         """Quantized GEMM interface."""
+
+    def dequantize(self, *args, **kwargs) -> torch.Tensor:
+        """Dequantize the quantized tensor"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement dequantize function"
+        )
+
+    def update_quantized(self, *args, **kwargs) -> torch.Tensor:
+        """Update the quantized tensor with the given tensor in-place"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement update_quantized function"
+        )
 
 
 def is_experimental(x: Union[Quantizer, QuantizedTensorBase]) -> bool:

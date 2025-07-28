@@ -19,7 +19,7 @@ class PerTensorQuantizedTensor(ExperimentalQuantizedTensor):
             f"{self.__class__.__name__}("
             f"dtype={self.dtype}, "
             f"device={self.device}, "
-            f"low_precision_dtype={self.low_precision_dtype}, "
+            f"quant_dtype={self.quant_dtype}, "
             f"data={self.dequantize(dtype=self.dtype)}, "
             f"original_shape={self.original_shape}"
             ")"
@@ -53,39 +53,13 @@ class PerTensorQuantizedTensor(ExperimentalQuantizedTensor):
         if dtype is None:
             dtype = self.dtype
 
-        # TODO: what to do with data_t ?
+        # Ignore data_t for now
         assert self.data is not None, "QuantizedTensor has no valid tensor data"
         assert self.scale is not None, "QuantizedTensor has no valid scale"
         tensor_data = self.data
         tensor_scale = self.scale
+        # Dispatch to the quantizer
         return self.get_quantizer().dequantize(tensor_data, tensor_scale, dtype=dtype)
-
-    def get_quantizer(self) -> ExperimentalQuantizer:
-        """Get builder for QuantizedExperimentalTensor
-
-        Quantizer can be used for in-place operations.
-
-        """
-        if self.quantizer is not None:
-            return self.quantizer
-        raise ValueError("Quantizer is not set")
-
-    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], ExperimentalQuantizedTensor]:
-        """Prepare the quantization result for saving for backward"""
-        tensors = [self.data, self.data_t, self.scale, self.scale_t]
-        self.data = None
-        self.data_t = None
-        self.scale = None
-        self.scale_t = None
-        return tensors, self
-
-    def restore_from_saved(self, tensors: list[Optional[torch.Tensor]]) -> list[Optional[torch.Tensor]]:
-        """Restore the quantization result from the saved tensors"""
-        self.data = tensors[0]
-        self.data_t = tensors[1]
-        self.scale = tensors[2]
-        self.scale_t = tensors[3]
-        return tensors[4:]
 
     def update_usage(
         self,
@@ -267,7 +241,7 @@ class QuantizerFP8PerTensorRef(ExperimentalQuantizer):
         self,
         x: torch.Tensor,
         **kwargs,
-    ):
+    ) -> PerTensorQuantizedTensor:
         # sanity checks
         assert x.dtype in utils.HIGH_PRECISION_FLOAT_DTYPES, "Unsupported input dtype."
 
@@ -285,24 +259,17 @@ class QuantizerFP8PerTensorRef(ExperimentalQuantizer):
             scale_t=sx_t,
             dtype=x.dtype,
             device=x.device,
-            low_precision_dtype=self.dtype,
+            quant_dtype=self.dtype,
             quantizer=self,
             original_shape=original_shape,
         )
 
-    def dequantize(
-        self,
-        x: torch.Tensor,
-        sx: torch.Tensor,
-        is_data_t: bool = False,
-        dq_dtype: torch.dtype = torch.bfloat16,
-        dq_layout: quantization.DequantizeLayout = quantization.DequantizeLayout.AS_ORIGINAL,
-    ) -> Tuple[torch.Tensor, bool]:
-        dq_data = (x.to(torch.float32) * sx).to(dq_dtype)
-        if dq_layout == quantization.DequantizeLayout.AS_ORIGINAL and is_data_t:
-            return dq_data.t().contiguous(), False
-        else:
-            return dq_data, is_data_t
+    def dequantize(self, tensor: torch.Tensor, scale: torch.Tensor, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+        """Dequantize the quantized tensor"""
+        tensor = (tensor.to(torch.float32) * scale)
+        if dtype is None:
+            return tensor
+        return tensor.to(dtype)
 
     def qgemm(
         self,
@@ -418,7 +385,7 @@ class QuantizerFP8PerTensorRef(ExperimentalQuantizer):
         dst.data_t = qx_t
         dst.scale_t = sx_t
         dst.dtype = src.dtype
-        dst.low_precision_dtype = self.dtype
+        dst.quant_dtype = self.dtype
         dst.original_shape = original_shape
 
         return dst
@@ -462,7 +429,7 @@ class QuantizerFP8PerTensorRef(ExperimentalQuantizer):
             scale_t=sx_t,
             dtype=dtype,
             device=device,
-            low_precision_dtype=self.dtype,
+            quant_dtype=self.dtype,
             quantizer=self,
             original_shape=shape,
         )
@@ -634,7 +601,7 @@ class QuantizerFP8FP4PerTensorEmulation(ExperimentalQuantizer):
             scale_t=sx_t,
             dtype=tensor.dtype,
             device=tensor.device,
-            low_precision_dtype=self.dtype,
+            quant_dtype=self.dtype,
             quantizer=self,
             original_shape=original_shape,
         )
@@ -785,7 +752,7 @@ class QuantizerFP8FP4PerTensorEmulation(ExperimentalQuantizer):
         dst.data_t = qx_t
         dst.scale_t = sx_t
         dst.dtype = src.dtype
-        dst.low_precision_dtype = self.dtype
+        dst.quant_dtype = self.dtype
         dst.original_shape = original_shape
 
         return dst
@@ -832,7 +799,7 @@ class QuantizerFP8FP4PerTensorEmulation(ExperimentalQuantizer):
             scale_t=sx_t,
             dtype=dtype,
             device=device,
-            low_precision_dtype=self.dtype,
+            quant_dtype=self.dtype,
             quantizer=self,
             original_shape=shape,
         )

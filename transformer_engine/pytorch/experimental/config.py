@@ -12,6 +12,7 @@ import torch
 from transformer_engine.pytorch.experimental import utils
 from transformer_engine.pytorch.experimental import quantization
 from transformer_engine.pytorch.experimental import quantization_per_tensor_ref
+from transformer_engine.pytorch.experimental import quantization_microblock_ref
 from transformer_engine.pytorch.experimental.quantization import MMParams
 
 
@@ -38,6 +39,7 @@ class QuantizeRecipe(enum.Enum):
     FP8_CS_REF = "fp8_current_scaling_ref"
     FP8_CS_EMULATION = "fp8_current_scaling_emulation"
     FP4_CS_EMULATION = "fp4_current_scaling_emulation"
+    NVFP4_REF = "nv_fp4_ref"
 
 
 def get_qlinear_params_from_predefined(
@@ -82,6 +84,24 @@ def get_qlinear_params_from_predefined(
                 dtype=utils.Fp4Formats.E2M1,
             ),
         )
+    elif recipe == QuantizeRecipe.NVFP4_REF:
+        return QLinearParams(
+            x_quantizer=quantization_microblock_ref.QuantizerMicroBlockFP4Ref(
+                dtype=utils.Fp4Formats.E2M1,
+                quant_tile_shape=(1, 16),
+                pow_2_scales=False,
+            ),
+            w_quantizer=quantization_microblock_ref.QuantizerMicroBlockFP4Ref(
+                dtype=utils.Fp4Formats.E2M1,
+                quant_tile_shape=(1, 16),
+                pow_2_scales=False,
+            ),
+            g_quantizer=quantization_microblock_ref.QuantizerMicroBlockFP4Ref(
+                dtype=utils.Fp4Formats.E2M1,
+                quant_tile_shape=(1, 16),
+                pow_2_scales=False,
+            ),
+        )
     else:
         raise ValueError(f"Unsupported quantize recipe: {recipe}")
 
@@ -97,6 +117,8 @@ def get_qlinear_params_from_qat_params(qat_params_idx: int) -> Optional[QLinearP
         return get_qlinear_params_from_predefined(QuantizeRecipe.FP8_CS_EMULATION)
     if qat_params_idx == 2003:
         return get_qlinear_params_from_predefined(QuantizeRecipe.FP4_CS_EMULATION)
+    if qat_params_idx == 6010:
+        return get_qlinear_params_from_predefined(QuantizeRecipe.NVFP4_REF)
 
 
 def set_qlinear_params(

@@ -1424,7 +1424,7 @@ def gather_along_first_dim(
             "Attempting to all-gather an unsupported quantized tensor. "
             "Falling back to high-precision all-gather."
         )
-        if isinstance(inp, QuantizedTensor):
+        if isinstance(inp, QuantizedTensor) or experimental.quantization.is_experimental(inp):
             inp = inp.dequantize()
         # Falling back to high-precision all-gather for Float8BlockQuantizer
         # means that it should directly output GEMM_READY format
