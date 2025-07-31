@@ -66,6 +66,7 @@ from ...debug.pytorch.utils import any_feature_enabled
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ..export import is_in_onnx_export_mode, assert_warmed_up
@@ -192,6 +193,7 @@ class _LayerNormLinear(torch.autograd.Function):
             and not debug
             and not return_layernorm_output
             and not return_layernorm_output_gathered
+            and not isinstance(input_quantizer, NVFP4Quantizer)
         )
 
         # Apply normalization
@@ -1600,6 +1602,12 @@ class LayerNormLinear(TransformerEngineBaseModule):
             grad_output_quantizer.internal = True
             if fp8_grad:
                 grad_input_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_INPUT1]
+
+        # Temporarily use NVFP4Quantizer, for testing purposes
+        input_quantizer = NVFP4Quantizer()
+        weight_quantizer=NVFP4Quantizer()
+        if torch.is_grad_enabled():
+            grad_output_quantizer=NVFP4Quantizer()
 
         return (
             input_quantizer,

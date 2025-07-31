@@ -65,6 +65,7 @@ from ..tensor.quantized_tensor import (
 )
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..export import is_in_onnx_export_mode, assert_warmed_up
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...debug.pytorch.debug_state import TEDebugState
@@ -1454,6 +1455,13 @@ class Linear(TransformerEngineBaseModule):
             grad_output_quantizer.internal = True
             if fp8_grad:
                 grad_input_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_INPUT1]
+
+        # Temporarily use NVFP4Quantizer, for testing purposes
+        input_quantizer = NVFP4Quantizer()
+        weight_quantizer=NVFP4Quantizer()
+        if torch.is_grad_enabled():
+            grad_output_quantizer=NVFP4Quantizer()
+
         return (
             input_quantizer,
             weight_quantizer,
