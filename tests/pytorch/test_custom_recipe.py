@@ -47,7 +47,7 @@ def test_custom_recipe_sanity(module_type):
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
     # Single factory: map roles to quantizers
-    def quantizer_factory(role):
+    def quantizer_factory(role, **kwargs):
         if role in ("input", "weight", "output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
         if role in ("grad_output", "grad_input"):
@@ -84,7 +84,7 @@ def test_custom_recipe_grouped_linear_sanity():
     model = GroupedLinear(num_gemms, in_features, out_features, params_dtype=torch.bfloat16).cuda()
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
-    def quantizer_factory(role):
+    def quantizer_factory(role, **kwargs):
         if role in ("input", "weight", "output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
         if role in ("grad_output", "grad_input"):
@@ -130,7 +130,7 @@ def test_custom_recipe_matches_current_scaling():
     loss_ref.backward()
 
     # Custom: single factory returning quantizers per role to match Float8CurrentScaling
-    def quantizer_factory(role):
+    def quantizer_factory(role, **kwargs):
         if role in ("input", "weight", "output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
         if role in ("grad_output", "grad_input"):
@@ -178,7 +178,7 @@ def test_custom_recipe_ops_linear_2_1_layout():
     op = te_ops.Linear(in_features, out_features, device="cuda", dtype=torch.bfloat16)
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
-    def quantizer_factory(role):
+    def quantizer_factory(role, **kwargs):
         if role in ("input", "weight", "output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
         if role in ("grad_output", "grad_input"):
@@ -212,7 +212,7 @@ def test_custom_recipe_factory_invocation_counts_and_cycling():
     # Counters per role
     counts = {"input": 0, "weight": 0, "output": 0, "grad_output": 0, "grad_input": 0}
 
-    def quantizer_factory(role):
+    def quantizer_factory(role, **kwargs):
         if role in counts:
             counts[role] += 1
         if role in ("input", "weight", "output"):
