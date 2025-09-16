@@ -8,6 +8,7 @@ from typing import Optional, Tuple
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.tensor.quantized_tensor import Quantizer
 from transformer_engine.pytorch.tensor.base.float8_tensor_base import Float8TensorBase
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 
 
 class Float8CurrentScalingQuantizerRef(Quantizer):
@@ -194,18 +195,28 @@ class Float8CurrentScalingQuantizerRef(Quantizer):
         x: torch.Tensor,
         **kwargs,
     ) -> Float8TensorBase:
-        # sanity checks
-        # assert x.dtype in utils.HIGH_PRECISION_FLOAT_DTYPES, "Unsupported input dtype."
-
         qx, sx, qx_t, sx_t = self._quantize(x)
 
+        tensor_base_args = {
+            "data": qx,
+            "fp8_scale_inv": sx,
+            "data_transpose": qx_t,
+            "fp8_dtype": TE_DType[self.dtype],
+            "quantizer": self,
+        }
+
         return Float8TensorBase(
-            data=qx,
-            fp8_scale_inv=sx,
-            data_transpose=qx_t,
-            fp8_dtype=TE_DType[self.dtype],
-            quantizer=self,
+            **tensor_base_args,
         )
+        # quantized_tensor_args = {
+        #     "shape": x.size(),
+        #     "dtype": x.dtype,
+        #     "requires_grad": False,
+        # }
+        # return Float8Tensor(
+        #     **quantized_tensor_args,
+        #     **tensor_base_args,
+        # )
 
     def dequantize(self, tensor: torch.Tensor, scale_inv: torch.Tensor, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """Dequantize the quantized tensor"""
