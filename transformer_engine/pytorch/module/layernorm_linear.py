@@ -4,6 +4,7 @@
 
 """LayerNormLinear API"""
 import os
+import csv
 import warnings
 from typing import Callable, Dict, Optional, Tuple, Union, List
 from functools import reduce
@@ -76,6 +77,35 @@ from ..cpp_extensions import (
 )
 
 __all__ = ["LayerNormLinear"]
+
+
+# Optional CSV logging for RMSE of activation quantization (after LN, before GEMM)
+# Enable by setting env var TE_LAYERNORM_LINEAR_RMSE_CSV to a file path.
+_RMSE_CSV_PATH = os.getenv("TE_LAYERNORM_LINEAR_RMSE_CSV", None)
+
+
+def _te_write_rmse_csv(module_name: str, tensor_name: str, ref_tensor: torch.Tensor, q_tensor) -> None:
+    """Compute RMSE between ref_tensor and dequantized q_tensor, and append to CSV.
+
+    This is a best-effort utility; failures are silently ignored to avoid disrupting training.
+    """
+    if _RMSE_CSV_PATH is None:
+        return
+    with torch.no_grad():
+        dq = q_tensor.dequantize(dtype=ref_tensor.dtype)
+        diff = (dq - ref_tensor).float()
+        rmse = torch.sqrt(torch.mean(diff * diff)).item()
+
+    file_exists = os.path.exists(_RMSE_CSV_PATH)
+    with open(_RMSE_CSV_PATH, "a", newline="") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(["rmse"])
+        writer.writerow(
+            [
+                f"{rmse:.8e}",
+            ]
+        )
 
 
 class _LayerNormLinear(torch.autograd.Function):
@@ -224,6 +254,34 @@ class _LayerNormLinear(torch.autograd.Function):
         if return_layernorm_output or return_layernorm_output_gathered:
             ln_out_return = ln_out
 
+        # Log RMSE when norm is quantized inside the kernel as well
+        # Reconstruct reference LN output in high precision and compare against dequantized quantized output
+        if (
+            _RMSE_CSV_PATH is not None
+            and (fp8 or debug)
+            and with_quantized_norm
+            and isinstance(ln_out, QuantizedTensorBase)
+        ):
+            with torch.no_grad():
+                mu_b = mu.view(-1, 1)
+                rs_b = rsigma.view(-1, 1)
+                if normalization == "LayerNorm":
+                    y = (inputmat - mu_b) * rs_b
+                    gamma_eff = ln_weight + (1.0 if zero_centered_gamma else 0.0)
+                    ref = y * gamma_eff
+                    if ln_bias is not None:
+                        ref = ref + ln_bias
+                else:  # RMSNorm
+                    y = inputmat * rs_b
+                    gamma_eff = ln_weight + (1.0 if zero_centered_gamma else 0.0)
+                    ref = y * gamma_eff
+                _te_write_rmse_csv(
+                    module.name if hasattr(module, "name") and module.name is not None else module.__class__.__name__,
+                    "ln_out_total",
+                    ref,
+                    ln_out,
+                )
+
         # ------------------------------------------------------
         # Prepare GEMM input tensor
         # Note: Cast to expected dtype and perform tensor-parallel communication
@@ -265,7 +323,15 @@ class _LayerNormLinear(torch.autograd.Function):
                     )
         else:
             if (fp8 or debug) and not with_quantized_norm:
+                # Log RMSE for input quantization
+                ln_out_ref = ln_out
                 ln_out = input_quantizer(ln_out)
+                _te_write_rmse_csv(
+                    module.name if hasattr(module, "name") and module.name is not None else module.__class__.__name__,
+                    "ln_out_total",
+                    ln_out_ref,
+                    ln_out,
+                )
             ln_out_total = ln_out
         nvtx_range_pop(f"{nvtx_label}.gemm_input_cast_comm")
         # ------------------------------------------------------

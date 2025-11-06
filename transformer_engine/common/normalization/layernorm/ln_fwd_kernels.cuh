@@ -9,6 +9,7 @@
 
 #include <cfloat>
 #include <cstdio>
+#include <cuda_bf16.h>
 
 #include "../../utils.cuh"
 #include "../common.h"
@@ -123,7 +124,13 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_tuned_kernel(
 
         if (requires_amax) {
           __builtin_assume(amax >= 0);
-          amax = fmaxf(amax, fabsf(temp_output));
+          compute_t val_for_amax = temp_output;
+          if (params.amax_on_bf16) {
+            // Round to BF16 before measuring amax
+            nv_bfloat16 bv = __float2bfloat16_rn(static_cast<float>(val_for_amax));
+            val_for_amax = static_cast<compute_t>(__bfloat162float(bv));
+          }
+          amax = fmaxf(amax, fabsf(static_cast<float>(val_for_amax)));
         }
         if (params.fp8_out) {
           temp_output = temp_output * scale;
@@ -290,7 +297,12 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_general_kerne
           if (col + jt < params.cols) {
             compute_t z_ij = z.data.elt[jt];
             __builtin_assume(amax >= 0);
-            amax = fmaxf(amax, fabsf(z_ij));
+            compute_t val_for_amax = z_ij;
+            if (params.amax_on_bf16) {
+              nv_bfloat16 bv = __float2bfloat16_rn(static_cast<float>(val_for_amax));
+              val_for_amax = static_cast<compute_t>(__bfloat162float(bv));
+            }
+            amax = fmaxf(amax, fabsf(static_cast<float>(val_for_amax)));
             if (params.fp8_out) {
               z.data.elt[jt] = z_ij * scale;
             }

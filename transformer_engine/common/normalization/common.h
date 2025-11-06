@@ -91,7 +91,8 @@ struct KernelParamsBase {
 
 struct ForwardKernelParams : public KernelParamsBase {
   ForwardKernelParams()
-      : KernelParamsBase(), z(nullptr), beta(nullptr), epsilon(0.f), fp8_out(false) {}
+      : KernelParamsBase(), z(nullptr), beta(nullptr), epsilon(0.f), fp8_out(false),
+        amax_on_bf16(false) {}
 
   // Output of LN FWD.
   void* z;
@@ -111,6 +112,9 @@ struct ForwardKernelParams : public KernelParamsBase {
 
   // Whether to compute scale and amax
   bool fp8_out;
+
+  // When true, compute amax on BF16-rounded values before scaling (for analysis)
+  bool amax_on_bf16;
 };
 
 struct BackwardKernelParams : public KernelParamsBase {

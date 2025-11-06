@@ -100,6 +100,12 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
     return;
   }
 
+  // std::cerr << "[NVTE LN FWD] backend=" << (cudnn_backend ? "cudnn" : "te")
+  // << " otype=" << to_string(z->data.dtype)
+  // << " amax_ptr=" << z->amax.dptr
+  // << " fp8_out=" << (is_fp8_dtype(z->data.dtype) ? 1 : 0)
+  // << std::endl;
+
   NVTE_CHECK(workspace->data.shape == plan->getWorkspaceShape());
   NVTE_CHECK(
       !is_block_scaling(z->scaling_mode) || (!training || z->columnwise_scale_inv.dptr != nullptr),

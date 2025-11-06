@@ -101,6 +101,8 @@ void TeNormalizationPlan<ForwardKernelParams>::execute(Tensor* z, void* x_dptr, 
   kernel_params.amax = z->amax.dptr;
   kernel_params.scale = z->scale.dptr;
   kernel_params.scale_inv = z->scale_inv.dptr;
+  // Toggle amax policy via env var: when set, amax measured on BF16-rounded values
+  kernel_params.amax_on_bf16 = transformer_engine::getenv<bool>("NVTE_LN_AMAX_FROM_BF16");
 
   if (_is_layernorm) {
     kernel_params.mu = mean_dptr;
