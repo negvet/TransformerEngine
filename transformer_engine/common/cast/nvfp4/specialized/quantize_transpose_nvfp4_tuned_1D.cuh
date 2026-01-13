@@ -11,6 +11,8 @@
 #ifndef TRANSFORMER_ENGINE_QUANTIZE_TRANSPOSE_NVFP4_TUNED_1D_CUH_
 #define TRANSFORMER_ENGINE_QUANTIZE_TRANSPOSE_NVFP4_TUNED_1D_CUH_
 
+#include <cstdio>
+
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include <cuda_runtime.h>
@@ -151,8 +153,10 @@ __device__ __forceinline__ float get_amax_of_pair(const IType2 pair) {
 // Compute "correct" per-block encoding scaling factor
 __device__ __forceinline__ bf16 compute_nvfp4_scaling_coefficient(const nvfp4_scale_t S_dec_block,
                                                                   const float S_enc) {
-  constexpr float float_max = detail::TypeExtrema<float>::max;
-  const float scale_rcp = fminf(S_enc / static_cast<float>(S_dec_block), float_max);
+  // Clamp to bf16 max (not float max) because we immediately cast to bf16 below.
+  // Otherwise values in (bf16_max, float_max] would overflow to bf16 inf.
+  constexpr float bf16_max = detail::TypeExtrema<bf16>::max;
+  const float scale_rcp = fminf(S_enc / static_cast<float>(S_dec_block), bf16_max);
   return static_cast<bf16>(scale_rcp);
 }
 

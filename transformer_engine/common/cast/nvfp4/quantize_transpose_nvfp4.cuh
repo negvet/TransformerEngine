@@ -11,6 +11,8 @@
 #ifndef TRANSFORMER_ENGINE_QUANTIZE_TRANSPOSE_NVFP4_CUH_
 #define TRANSFORMER_ENGINE_QUANTIZE_TRANSPOSE_NVFP4_CUH_
 
+#include <cstdlib>
+
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include <cuda_runtime.h>
@@ -1168,7 +1170,27 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   // TODO(Frank): Is there a better way to do this?
   bool return_transpose = output->has_columnwise_data();
 
-  if (!use_2d_quantization && (input.dtype() == DType::kBFloat16)) {
+  // Cache the env var lookup once (avoid getenv()/atoi() overhead on every dispatch).
+  static const bool use_tuned_1d = []() -> bool {
+    // Knob to A/B test tuned vs default path:
+    // - USE_TUNED_1D=1: use tuned 1D bf16 kernel (when not using 2D quantization)
+    // - otherwise: use the default kernel path
+    const char *const v = std::getenv("USE_TUNED_1D");
+    return (v != nullptr) && (std::atoi(v) != 0);
+  }();
+
+  // One-time log confirmation (best-effort; may print once per TU in some build setups).
+  {
+    static bool logged_once = false;
+    if (!logged_once) {
+      logged_once = true;
+      NVTE_WARN("NVFP4 quantize_transpose path selection: ",
+                (use_tuned_1d ? "USE_TUNED_1D=1 (tuned_1D enabled)" : "USE_TUNED_1D!=1 (default)"),
+                ". Dispatcher will use tuned_1D only when input is bf16 and use_2d_quantization=0.");
+    }
+  }
+
+  if (!use_2d_quantization && (input.dtype() == DType::kBFloat16) && use_tuned_1d) {
     quantize_transpose_tuned_1D(input, noop, output, quant_config, stream);
     return;
   }
