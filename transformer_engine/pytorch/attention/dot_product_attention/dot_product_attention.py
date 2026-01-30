@@ -15,10 +15,7 @@ from torch.nn.parameter import Parameter
 
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import (
-    Format,
     Recipe,
-    DelayedScaling,
-    Float8CurrentScaling,
 )
 from transformer_engine.pytorch.utils import get_cudnn_version
 from transformer_engine.pytorch.quantization import (
@@ -90,62 +87,18 @@ _alibi_cache = {
 """
 This feature is **experimental** and subject to change.
 
-Some models may use different FP8 recipes for their linear layers and attention layers. To support this,
-users can either use multiple, nested autocast() contexts to assign a distinct recipe for each layer,
-or use a single autocast() for the non-attention layers and configure the recipe for the attention
-layers as follows.
+DotProductAttention FP8 configuration uses the recipe selected in
+`transformer_engine.pytorch.autocast(..., recipe=...)`.
 
-+-------------------+-----------+-----------------------------------------------------------------------------------+
-| Linear            | Attention | Configuration                                                                     |
-+===================+===========+===================================================================================+
-| FP8DS/FP8CS/NVFP4 | FP16/BF16 | Pass FP8DS, FP8CS or NVFP4 to autocast();                                     |
-|                   |           | export NVTE_DPA_FP8_RECIPE="F16"                                                  |
-+-------------------+-----------+-----------------------------------------------------------------------------------+
-| FP8DS             | FP8DS     | Pass FP8DS to autocast();                                                     |
-+-------------------+-----------+-----------------------------------------------------------------------------------+
-| FP8CS             | FP8DS     | Pass FP8CS to autocast();                                                     |
-|                   |           | Attention FP8DS reuses the fp8_format, fp8_dpa, fp8_mha values from linear FP8CS; |
-|                   |           | export NVTE_DPA_FP8_RECIPE="DelayedScaling"       # switch to DS                  |
-|                   |           | export NVTE_DPA_FP8DS_AMAX_ALGO="most_recent"     # or "max"                      |
-|                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
-|                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
-+-------------------+-----------+-----------------------------------------------------------------------------------+
-| NVFP4             | FP8DS     | Pass NVFP4 to autocast();                                                     |
-|                   |           | Attention FP8DS reuses the fp8_dpa, fp8_mha values from linear NVFP4;             |
-|                   |           | export NVTE_DPA_FP8_RECIPE="DelayedScaling"       # switch to DS                  |
-|                   |           | export NVTE_DPA_FP8_FORMAT="HYBRID"               # or "E4M3", "E5M2"             |
-|                   |           | export NVTE_DPA_FP8DS_AMAX_ALGO="most_recent"     # or "max"                      |
-|                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
-|                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
-+-------------------+-----------+-----------------------------------------------------------------------------------+
-| FP8DS             | FP8CS     | Pass FP8DS to autocast();                                                     |
-|                   |           | Attention uses FP8DS for S, dP tensors, and creates a new FP8CS recipe for QKV, O,|
-|                   |           | dO, dQKV tensors based on fp8_format, fp8_dpa, fp8_mha from linear FP8DS;         |
-|                   |           | export NVTE_DPA_FP8_RECIPE="Float8CurrentScaling" # switch to CS                  |
-+-------------------+-----------+-----------------------------------------------------------------------------------+
-| FP8CS             | FP8CS     | Pass FP8CS to autocast();                                                     |
-|                   |           | Attention uses FP8CS for QKV, O, dO, dQKV tensors, and creates a new FP8DS recipe |
-|                   |           | for S, dP tensors based on fp8_format, fp8_dpa, fp8_mha from linear FP8CS and:    |
-|                   |           | export NVTE_DPA_FP8DS_AMAX_ALGO="most_recent"     # or "max"                      |
-|                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
-|                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
-+-------------------+-----------+-----------------------------------------------------------------------------------+
-| NVFP4             | FP8CS     | Pass NVFP4 to autocast();                                                     |
-|                   |           | Attention creates a new FP8CS recipe for QKV, O, dO, dQKV, and a new FP8DS recipe |
-|                   |           | for S, dP, based on the fp8_dpa, fp8_mha values from linear NVFP4 and:            |
-|                   |           | export NVTE_DPA_FP8_RECIPE="Float8CurrentScaling" # switch to CS                  |
-|                   |           | export NVTE_DPA_FP8_FORMAT="HYBRID"               # or "E4M3", "E5M2"             |
-|                   |           | export NVTE_DPA_FP8DS_AMAX_ALGO="most_recent"     # or "max"                      |
-|                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
-|                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
-+-------------------+-----------+-----------------------------------------------------------------------------------+
+If you need different quantization policies for *linear layers vs attention*, prefer using
+`transformer_engine.common.recipe.CustomRecipe` and a role-aware quantizer factory (`qfactory`).
+This makes the behavior explicit:
+
+- linear roles: `linear:input`, `linear:weight`, `linear:output`, ...
+- dpa roles: `dpa:qkv`, `dpa:o`, `dpa:s`, `dpa:dqkv`, `dpa:do`, `dpa:dp`
+
+See `transformer_engine.pytorch.custom_recipes.quantization_dpa` for reference factories.
 """
-_dpa_fp8_recipe = os.getenv("NVTE_DPA_FP8_RECIPE", "")
-formats = {"HYBRID": Format.HYBRID, "E4M3": Format.E4M3, "E5M2": Format.E5M2}
-_dpa_fp8_format = formats[os.getenv("NVTE_DPA_FP8_FORMAT", "HYBRID")]
-_dpa_fp8ds_amax_algo = os.getenv("NVTE_DPA_FP8DS_AMAX_ALGO", "most_recent")
-_dpa_fp8ds_amax_histlen = int(os.getenv("NVTE_DPA_FP8DS_AMAX_HISTLEN", "1"))
-_dpa_fp8ds_reduce_amax = os.getenv("NVTE_DPA_FP8DS_REDUCE_AMAX", "1") == "1"
 
 
 __all__ = ["DotProductAttention"]
@@ -574,100 +527,15 @@ class DotProductAttention(TransformerEngineBaseModule):
         """
         _original_recipe = self.fp8_meta.get("recipe", None)
 
-        # global recipe set in autocast()
+        # Global recipe set in autocast(). DPA no longer performs recipe routing/mixing
+        # based on environment variables. If you want per-tensor or per-layer policies
+        # (e.g. linear vs attention), use CustomRecipe + semantic roles.
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
-        if fp8_recipe.custom():
-            return
-
-        # switch/append recipe: fp8_recipe stays unchanged, but DPA.fp8_meta["recipe"] may be set to
-        # a different recipe than fp8_recipe. DPA.quantizers may be a mix of different quantizers as well.
-        #
-        # fp8_recipe                | NVTE_DPA_FP8_RECIPE | self.fp8_meta["recipe"] | self.quantizers
-        # --------------------------------------------------------------------------------------------
-        # DelayedScaling (DS)       | unset               | DS                      | all DS
-        # Float8CurrentScaling (CS) | unset               | DS                      | CS for QKV, O, dO, dQKV; DS for S, dP
-        # x={DS, CS}                | y                   | refer to row x=y        | refer to row x=y
         fp8_recipe_dpa = fp8_recipe
         fp8_recipes = fp8_recipe
-        if _dpa_fp8_recipe == "F16":
-            # ignore the recipe from autocast, set fp8_dpa = False, fp8_mha = False
-            fp8_recipe.fp8_dpa = False
-            fp8_recipe.fp8_mha = False
-        elif fp8_recipe.float8_current_scaling() and _dpa_fp8_recipe == "DelayedScaling":
-            # reuse fp8_format, fp8_dpa, fp8_mha from fp8_recipe, and construct a DS recipe
-            fake_recipe = DelayedScaling(
-                fp8_format=fp8_recipe.fp8_format,
-                amax_history_len=_dpa_fp8ds_amax_histlen,
-                amax_compute_algo=_dpa_fp8ds_amax_algo,
-                fp8_dpa=fp8_recipe.fp8_dpa,
-                fp8_mha=fp8_recipe.fp8_mha,
-                reduce_amax=_dpa_fp8ds_reduce_amax,
-            )
-            fp8_recipe_dpa = fake_recipe
-            fp8_recipes = fp8_recipe_dpa
-        elif fp8_recipe.nvfp4() and _dpa_fp8_recipe == "DelayedScaling":
-            # reuse fp8_dpa, fp8_mha from fp8_recipe but not fp8_format; construct a DS recipe
-            fake_recipe = DelayedScaling(
-                fp8_format=_dpa_fp8_format,
-                amax_history_len=_dpa_fp8ds_amax_histlen,
-                amax_compute_algo=_dpa_fp8ds_amax_algo,
-                fp8_dpa=fp8_recipe.fp8_dpa,
-                fp8_mha=fp8_recipe.fp8_mha,
-                reduce_amax=_dpa_fp8ds_reduce_amax,
-            )
-            fp8_recipe_dpa = fake_recipe
-            fp8_recipes = fp8_recipe_dpa
-        elif fp8_recipe.delayed() and _dpa_fp8_recipe == "Float8CurrentScaling":
-            # reuse fp8_format, fp8_dpa, fp8_mha from fp8_recipe, and construct a CS+DS recipe
-            fake_recipes = [
-                Float8CurrentScaling(
-                    fp8_format=fp8_recipe.fp8_format,
-                    fp8_dpa=fp8_recipe.fp8_dpa,
-                    fp8_mha=fp8_recipe.fp8_mha,
-                ),
-                fp8_recipe,
-            ]
-            fp8_recipe_dpa = fake_recipes[1]
-            fp8_recipes = fake_recipes
-        elif (
-            fp8_recipe.float8_current_scaling()
-            and _dpa_fp8_recipe in ("", "Float8CurrentScaling")
-            and (fp8_recipe.fp8_dpa or fp8_recipe.fp8_mha)
-        ):
-            # use fp8_recipe for QKV, O, dO, dQKV, and construct a DS recipe for S, dP
-            # reuse fp8_format, fp8_dpa, fp8_mha from fp8_recipe
-            fake_recipe = DelayedScaling(
-                fp8_format=fp8_recipe.fp8_format,
-                amax_history_len=_dpa_fp8ds_amax_histlen,
-                amax_compute_algo=_dpa_fp8ds_amax_algo,
-                fp8_dpa=fp8_recipe.fp8_dpa,
-                fp8_mha=fp8_recipe.fp8_mha,
-                reduce_amax=_dpa_fp8ds_reduce_amax,
-            )
-            fp8_recipe_dpa = fake_recipe
-            fp8_recipes = [fp8_recipe, fp8_recipe_dpa]
-        elif fp8_recipe.nvfp4() and _dpa_fp8_recipe == "Float8CurrentScaling":
-            # reuse fp8_dpa, fp8_mha from fp8_recipe but not fp8_format
-            # construct a CS recipe for QKV, O, dO, dQKV and a DS recipe for S, dP
-            fake_recipes = [
-                Float8CurrentScaling(
-                    fp8_format=_dpa_fp8_format,
-                    fp8_dpa=fp8_recipe.fp8_dpa,
-                    fp8_mha=fp8_recipe.fp8_mha,
-                ),
-                DelayedScaling(
-                    fp8_format=_dpa_fp8_format,
-                    amax_history_len=_dpa_fp8ds_amax_histlen,
-                    amax_compute_algo=_dpa_fp8ds_amax_algo,
-                    fp8_dpa=fp8_recipe.fp8_dpa,
-                    fp8_mha=fp8_recipe.fp8_mha,
-                    reduce_amax=_dpa_fp8ds_reduce_amax,
-                ),
-            ]
-            fp8_recipe_dpa = fake_recipes[1]
-            fp8_recipes = fake_recipes
-        # DPA only support DS and CS; other recipes should have fp8_dpa=False, fp8_mha=False
-        if not fp8_recipe_dpa.float8_per_tensor_scaling():
+        # DPA supports DS/CS and CustomRecipe. For any other recipe types,
+        # expect fp8_dpa=False and fp8_mha=False.
+        if not (fp8_recipe_dpa.float8_per_tensor_scaling() or fp8_recipe_dpa.custom()):
             assert not (
                 fp8_recipe_dpa.fp8_dpa or fp8_recipe_dpa.fp8_mha
             ), f"DotProductAttention does not support {fp8_recipe_dpa.__class__.__name__} recipe"
@@ -716,8 +584,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             self.fp8_meta["fp8_group"] = fp8_group
 
             # Set FP8_MAX per tensor according to recipe
-            self.fp8_meta["fp8_max_fwd"] = self.fp8_meta["recipe"].fp8_format.value.max_fwd
-            self.fp8_meta["fp8_max_bwd"] = self.fp8_meta["recipe"].fp8_format.value.max_bwd
+            if hasattr(self.fp8_meta["recipe"], "fp8_format"):
+                self.fp8_meta["fp8_max_fwd"] = self.fp8_meta["recipe"].fp8_format.value.max_fwd
+                self.fp8_meta["fp8_max_bwd"] = self.fp8_meta["recipe"].fp8_format.value.max_bwd
 
             # Allocate scales and amaxes
             self.init_fp8_meta_tensors(fp8_recipes)
@@ -747,6 +616,44 @@ class DotProductAttention(TransformerEngineBaseModule):
             # Clear cached workspaces as they were created with the old recipe/quantizer type
             self._fp8_workspaces.clear()
 
+    @staticmethod
+    def _get_dpa_fp8_quantizer_roles(fwd: bool) -> List[str]:
+        """Semantic roles for DPA FP8 quantizer slots.
+
+        The attention backends index into `quantizers["scaling_fwd"/"scaling_bwd"]`
+        using `tex.FP8FwdTensors`/`tex.FP8BwdTensors` (see `cpp_extensions/fused_attn.py`).
+        DPA allocates slots using the GEMM-style convention:
+          - forward:  [GEMM1_INPUT, GEMM1_WEIGHT, GEMM1_OUTPUT, GEMM2_INPUT, ..., GEMM3_OUTPUT]
+          - backward: [GRAD_OUTPUT1, GRAD_INPUT1, GRAD_OUTPUT2, GRAD_INPUT2, GRAD_OUTPUT3, GRAD_INPUT3]
+
+        Roles below are a stable contract for CustomRecipe factories.
+        """
+        if fwd:
+            return [
+                # GEMM1: "QKV slot" (DPA uses GEMM1_OUTPUT as META_QKV)
+                "dpa:gemm1_input",
+                "dpa:gemm1_weight",
+                "dpa:qkv",
+                # GEMM2: "O slot" (DPA uses GEMM2_INPUT as META_O)
+                "dpa:o",
+                "dpa:gemm2_weight",
+                "dpa:gemm2_output",
+                # GEMM3: "S slot" (DPA uses GEMM3_OUTPUT as META_S)
+                "dpa:gemm3_input",
+                "dpa:gemm3_weight",
+                "dpa:s",
+            ]
+        return [
+            # Backward slots (DPA uses GRAD_OUTPUT1 as META_DQKV, GRAD_INPUT2 as META_DO,
+            # and GRAD_INPUT3 as META_DP).
+            "dpa:dqkv",
+            "dpa:grad_input1",
+            "dpa:grad_output2",
+            "dpa:do",
+            "dpa:grad_output3",
+            "dpa:dp",
+        ]
+
     def set_meta_tensor(self, fwd: bool, recipe: Union[Recipe, List[Recipe]]) -> None:
         """Override to allow multiple recipes. Init scales and amaxes for fwd | bwd."""
         if isinstance(recipe, Recipe):
@@ -771,12 +678,23 @@ class DotProductAttention(TransformerEngineBaseModule):
             ):
                 return
 
-        # When fp8_recipe=Float8CurrentScaling, recipe=[CS, DS], and QKV/dQKV, O/dO use CS quantizers, S/dP use DS quantizers.
-        # See table above in init_fp8_metadata for more detail.
+        # If multiple recipes are provided (experimental), split quantizer slots by GEMMs:
+        # first segment covers GEMM1+GEMM2 slots, second segment covers GEMM3 slots.
         num_gemms = [2, 1] if len(recipe) == 2 else [3]
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
         # 2 (grad_output and grad_input) for bwd
         num_fp8_tensors = [x * 3 if fwd else x * 2 for x in num_gemms]
+
+        # Semantic roles for each quantizer slot. These are ignored by non-custom recipe states,
+        # but required by CustomRecipeState.
+        all_roles = self._get_dpa_fp8_quantizer_roles(fwd)
+        assert len(all_roles) == (9 if fwd else 6)
+        role_segments: List[List[str]] = []
+        offset = 0
+        for n in num_fp8_tensors:
+            role_segments.append(all_roles[offset : offset + n])
+            offset += n
+        assert offset == len(all_roles)
 
         # Initialize recipe state and quantizers
         recipe_states = [
@@ -784,6 +702,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 recipe[i],
                 mode=("forward" if fwd else "backward"),
                 num_quantizers=num_fp8_tensors[i],
+                roles=role_segments[i],
             )
             for i in range(len(recipe))
         ]
